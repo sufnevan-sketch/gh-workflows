@@ -130,7 +130,18 @@ jobs:
 
               // --- Checks gate: everything on the head SHA green, required ones present ---
               const checkRuns = await github.paginate(github.rest.checks.listForRef, { owner, repo, ref: pr.head.sha, per_page: 100 });
-              const relevant = checkRuns.filter(c => !c.name.endsWith("auto-merge"));
+              // Keep only the newest run per check name. A re-run, or two events racing
+              // into the same concurrency group, leaves the superseded run on the SHA with
+              // conclusion "cancelled"; counting it means one cancelled run blocks the
+              // merge forever even after the real run goes green (verified 2026-09-17,
+              // camedu-io/crm PR #5, where opened+labeled fired one second apart).
+              // GitHub's own checks UI dedupes the same way.
+              const newest = new Map();
+              for (const c of checkRuns.filter(c => !c.name.endsWith("auto-merge"))) {
+                const prev = newest.get(c.name);
+                if (!prev || new Date(c.started_at || 0) > new Date(prev.started_at || 0) || c.id > prev.id) newest.set(c.name, c);
+              }
+              const relevant = [...newest.values()];
               const pending = relevant.filter(c => c.status !== "completed").map(c => c.name);
               const failed = relevant.filter(c => c.status === "completed" && !["success", "neutral", "skipped"].includes(c.conclusion)).map(c => `${c.name}=${c.conclusion}`);
               const labels = (pr.labels || []).map(l => l.name);
