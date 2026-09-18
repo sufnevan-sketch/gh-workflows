@@ -59,10 +59,12 @@ Write-Host ""
 Write-Host "Edit before committing:"
 Write-Host "  .github/review-context.md   -> one paragraph of project context + the contracts reviewers must hold the diff against"
 Write-Host ""
-Write-Host "Then, from YOUR terminal (never through a Claude Bash tool; non-TTY stdin sets an empty secret):"
-Write-Host "  gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo $name      # value: claude setup-token"
-Write-Host "  gh secret set OPENAI_API_KEY --repo $name               # Codex second review on feat/ fix/ refactor/ perf/ build/ branches"
-if ($WithAutoFix) { Write-Host "  gh secret set AUTOFIX_PAT --repo $name                  # fine-grained PAT: Contents + Pull requests RW on this repo" }
+$names = if ($WithAutoFix) { 'CLAUDE_CODE_OAUTH_TOKEN,OPENAI_API_KEY,AUTOFIX_PAT' } else { 'CLAUDE_CODE_OAUTH_TOKEN,OPENAI_API_KEY' }
+Write-Host "Secrets (values in the gitignored env file, pushed by name, never printed):"
+Write-Host "  pwsh $PSScriptRoot\set-secrets.ps1 -Repo $name -Names $names"
+Write-Host "    CLAUDE_CODE_OAUTH_TOKEN <- claude setup-token (interactive, your terminal)"
+Write-Host "    OPENAI_API_KEY          <- platform.openai.com API key (Codex second review)"
+if ($WithAutoFix) { Write-Host "    AUTOFIX_PAT             <- fine-grained PAT: Contents + Pull requests RW on this repo" }
 Write-Host "  gh secret list --repo $name                              # names + dates only"
 Write-Host ""
 Write-Host "Repo settings (see README):"

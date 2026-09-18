@@ -20,6 +20,7 @@ Each repo keeps only thin stubs under `.github/workflows/` that call the workflo
 | `stubs/review-context.md` | starter for the one per-repo file the reviewers read |
 | `stubs/pull_request_template.md` | PR body written for a reader who does not read code |
 | `install.ps1` | copies the stubs into a repo, fills the ci inputs |
+| `set-secrets.ps1` | pushes named secrets from a gitignored env file to the repo with `gh secret set --body`; values never printed |
 
 ## Install into a repo
 
@@ -30,15 +31,14 @@ pwsh install.ps1 -Repo <repo-root> -Setup none|node-pnpm|node-npm|python -Verify
 Then in the repo:
 
 1. Fill `.github/review-context.md`: one paragraph of what the repo is, its stack, and the contracts a reviewer must hold the diff against. Both reviewers read it from the **base** branch, so a PR cannot rewrite its own reviewer's instructions.
-2. Secrets, from your own terminal (a non-TTY `gh secret set` silently stores an empty value):
+2. Secrets, before the PR. Values live once in a gitignored env file (default `EVAN_WORKSPACE/.env`, lines `CLAUDE_CODE_OAUTH_TOKEN=` and `OPENAI_API_KEY=`); the helper pushes them by name with `gh secret set --body` and never prints them:
 
 ```powershell
-gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo <owner>/<repo>
-gh secret set OPENAI_API_KEY --repo <owner>/<repo>
+pwsh set-secrets.ps1 -Repo <owner>/<repo>            # add -Names ...,AUTOFIX_PAT with auto-fix
 gh secret list --repo <owner>/<repo>
 ```
 
-   `CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token`. `OPENAI_API_KEY` is a platform key; the Codex action proxies the Responses API, so a ChatGPT login does not work in CI.
+   `CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token` (interactive, run it yourself). `OPENAI_API_KEY` is a platform key; the Codex action proxies the Responses API, so a ChatGPT login does not work in CI. Do not run `gh secret set` interactively from a non-TTY tool: it stores an empty value silently.
 3. Commit `.github/` on a `docs/` branch and open the PR. The gate never auto-merges a PR that touches `.github/workflows/**`, so merge this one by hand; it is the smoke test for `ci / verify` and `claude / claude-review`. A second PR on a `fix/` branch exercises Codex and the gate.
 
 Per-repo variance is exactly: the ci stub's `setup` / `verify` (and `working-directory` for wrapper repos), and `review-context.md`. Everything else is here.
