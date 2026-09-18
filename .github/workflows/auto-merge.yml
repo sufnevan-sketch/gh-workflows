@@ -139,7 +139,11 @@ jobs:
               const newest = new Map();
               for (const c of checkRuns.filter(c => !c.name.endsWith("auto-merge"))) {
                 const prev = newest.get(c.name);
-                if (!prev || new Date(c.started_at || 0) > new Date(prev.started_at || 0) || c.id > prev.id) newest.set(c.name, c);
+                const t = c2 => new Date(c2.started_at || 0).getTime();
+                // started_at decides; id only breaks an exact tie. An `||` on id alone could
+                // let an older run displace a newer one, and a stale green is the one
+                // direction this gate must never fail in.
+                if (!prev || t(c) > t(prev) || (t(c) === t(prev) && c.id > prev.id)) newest.set(c.name, c);
               }
               const relevant = [...newest.values()];
               const pending = relevant.filter(c => c.status !== "completed").map(c => c.name);
