@@ -10,7 +10,7 @@ Each repo keeps only thin stubs under `.github/workflows/` that call the workflo
 |---|---|
 | `.github/workflows/ci.yml` | reusable: `branch-name` (enforces `<type>/<short-description>`) + `verify` (optional toolchain, then the repo's one verify command) |
 | `.github/workflows/claude-review.yml` | reusable: Claude reviews, posts inline findings, submits `AUTO-REVIEW: PASS` or `CHANGES REQUESTED`; a gate step turns that into the job's exit code |
-| `.github/workflows/codex-review.yml` | reusable: Codex (`openai/codex-action@v1`, read-only sandbox) reviews `feat/ fix/ refactor/ perf/ build/` branches or PRs labeled `codex-review` / `risk:high`; `CODEX-REVIEW: PASS` or `CHANGES REQUESTED`, red/green |
+| `.github/workflows/codex-review.yml` | reusable: Codex second review on `feat/ fix/ refactor/ perf/ build/` branches or PRs labeled `codex-review` / `risk:high`. Default `mode: cloud` = Codex cloud code review from the ChatGPT plan (the job comments `@codex review`, waits for the bot's review, red on any P0/P1 finding). `mode: action` = `openai/codex-action@v1` with an API key. Either way: `CODEX-REVIEW: PASS` or `CHANGES REQUESTED`, red/green |
 | `.github/workflows/auto-merge.yml` | reusable: squash-merges when every check on the head SHA is green, required checks present, Codex present where the branch rule applies |
 | `.github/workflows/claude.yml` | reusable: `@claude` mention handler |
 | `.github/workflows/auto-fix.yml` | reusable, opt-in: Claude fixes CHANGES REQUESTED in CI, max 3 rounds, needs `AUTOFIX_PAT` |
@@ -31,15 +31,16 @@ pwsh install.ps1 -Repo <repo-root> -Setup none|node-pnpm|node-npm|python -Verify
 Then in the repo:
 
 1. Fill `.github/review-context.md`: one paragraph of what the repo is, its stack, and the contracts a reviewer must hold the diff against. Both reviewers read it from the **base** branch, so a PR cannot rewrite its own reviewer's instructions.
-2. Secrets, before the PR. Values live once in a gitignored env file (default `EVAN_WORKSPACE/.env`, lines `CLAUDE_CODE_OAUTH_TOKEN=` and `OPENAI_API_KEY=`); the helper pushes them by name with `gh secret set --body` and never prints them:
+2. Secrets, before the PR. Values live once in a gitignored env file (default `EVAN_WORKSPACE/.env`, line `CLAUDE_CODE_OAUTH_TOKEN=`); the helper pushes them by name with `gh secret set --body` and never prints them:
 
 ```powershell
-pwsh set-secrets.ps1 -Repo <owner>/<repo>            # add -Names ...,AUTOFIX_PAT with auto-fix
+pwsh set-secrets.ps1 -Repo <owner>/<repo>            # -Names CLAUDE_CODE_OAUTH_TOKEN,AUTOFIX_PAT with auto-fix; add OPENAI_API_KEY only for codex mode: action
 gh secret list --repo <owner>/<repo>
 ```
 
-   `CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token` (interactive, run it yourself). `OPENAI_API_KEY` is a platform key; the Codex action proxies the Responses API, so a ChatGPT login does not work in CI. Do not run `gh secret set` interactively from a non-TTY tool: it stores an empty value silently.
-3. Commit `.github/` on a `docs/` branch and open the PR. The gate never auto-merges a PR that touches `.github/workflows/**`, so merge this one by hand; it is the smoke test for `ci / verify` and `claude / claude-review`. A second PR on a `fix/` branch exercises Codex and the gate.
+   `CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token` (interactive, run it yourself). Do not run `gh secret set` interactively from a non-TTY tool: it stores an empty value silently.
+3. Codex (cloud mode, the default, no API key): in chatgpt.com → Codex → Settings → Code review, the GitHub connector must be installed for the repo's owner and the repo must appear in the list; keep personal **Auto review OFF** so Codex reviews only the PRs this workflow asks about (`@codex review`), never business PRs. Codex reads the repo's `AGENTS.md`, so repo contracts for Codex go there (2 KB cap). `OPENAI_API_KEY` is needed only with `mode: action`.
+4. Commit `.github/` on a `docs/` branch and open the PR. The gate never auto-merges a PR that touches `.github/workflows/**`, so merge this one by hand; it is the smoke test for `ci / verify` and `claude / claude-review`. A second PR on a `fix/` branch exercises Codex and the gate.
 
 Per-repo variance is exactly: the ci stub's `setup` / `verify` (and `working-directory` for wrapper repos), and `review-context.md`. Everything else is here.
 

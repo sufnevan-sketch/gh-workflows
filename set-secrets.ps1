@@ -12,7 +12,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)] [string] $Repo,                       # owner/repo
-  [string[]] $Names = @('CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY'),
+  [string[]] $Names = @('CLAUDE_CODE_OAUTH_TOKEN'),   # add OPENAI_API_KEY for codex mode: action, AUTOFIX_PAT for auto-fix
   [string] $EnvFile = 'C:\Users\evanl\Desktop\EVAN_WORKSPACE\.env'
 )
 $ErrorActionPreference = 'Stop'

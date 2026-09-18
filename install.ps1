@@ -63,13 +63,15 @@ Write-Host ""
 Write-Host "Edit before committing:"
 Write-Host "  .github/review-context.md   -> one paragraph of project context + the contracts reviewers must hold the diff against"
 Write-Host ""
-$names = if ($WithAutoFix) { 'CLAUDE_CODE_OAUTH_TOKEN,OPENAI_API_KEY,AUTOFIX_PAT' } else { 'CLAUDE_CODE_OAUTH_TOKEN,OPENAI_API_KEY' }
+$names = if ($WithAutoFix) { 'CLAUDE_CODE_OAUTH_TOKEN,AUTOFIX_PAT' } else { 'CLAUDE_CODE_OAUTH_TOKEN' }
 Write-Host "Secrets (values in the gitignored env file, pushed by name, never printed):"
 Write-Host "  pwsh $PSScriptRoot\set-secrets.ps1 -Repo $name -Names $names"
 Write-Host "    CLAUDE_CODE_OAUTH_TOKEN <- claude setup-token (interactive, your terminal)"
-Write-Host "    OPENAI_API_KEY          <- platform.openai.com API key (Codex second review)"
 if ($WithAutoFix) { Write-Host "    AUTOFIX_PAT             <- fine-grained PAT: Contents + Pull requests RW on this repo" }
 Write-Host "  gh secret list --repo $name                              # names + dates only"
+Write-Host ""
+Write-Host "Codex second review (cloud mode, ChatGPT plan, no API key): chatgpt.com -> Codex -> Settings -> Code review:"
+Write-Host "  connector installed for '$($name.Split('/')[0])', repo listed, personal Auto review OFF. Codex reads AGENTS.md."
 Write-Host ""
 Write-Host "Repo settings (see README):"
 Write-Host "  gh repo edit $name --enable-squash-merge --delete-branch-on-merge"
