@@ -123,6 +123,7 @@ Branch (`fix/...` or `feat/...`), PR, let `self-check` and `self-review` run, me
 
 ## Verdict log
 
+- [2026-09-17] sufnevan-sketch/evan-workspace PR #3, round 2 with CODEX_TRIGGER_PAT set | Claude PASS 2m08s; Codex cloud review triggered by the PAT-authored `@codex review`, reviewed in 2m43s, one P2 (non-blocking), `CODEX-REVIEW: PASS`; `gate / auto-merge` squash-merged and deleted the branch with no human action. First fully automatic merge through the loop. | Lesson: the whole install is: stubs + review-context + verify command + two secrets (Claude token, Codex-connected user's PAT) + repo listed in Codex settings.
 - [2026-09-17] sufnevan-sketch/evan-workspace PR #3 (fix/ branch) | `ci / *` green; `claude / claude-review` PASS in 3m56s with one real inline MEDIUM (BOM bytes uncounted), fixed in the next push; `gate / auto-merge` ran and correctly waited on Codex; `codex / codex-review` (cloud) got the bot reply "To use Codex here, create a Codex account and connect to github" | Lessons: (1) Codex ignores `@codex review` from `github-actions[bot]`; `CODEX_TRIGGER_PAT` is required, now fail-fast. (2) claude-code-action skips any PR that changes a workflow file; install PRs are hand-merge, now reported as a warning instead of "no verdict".
 
 One line per install: `[YYYY-MM-DD] <repo> | <what happened on the smoke-test PRs> | <lesson, if any>`.
