@@ -30,7 +30,7 @@ pwsh install.ps1 -Repo <repo-root> -Setup none|node-pnpm|node-npm|python -Verify
 
 Then in the repo:
 
-1. Fill `.github/review-context.md`: one paragraph of what the repo is, its stack, and the contracts a reviewer must hold the diff against. Both reviewers read it from the **base** branch, so a PR cannot rewrite its own reviewer's instructions.
+1. Fill `.github/review-context.md`: one paragraph of what the repo is, its stack, and the contracts a reviewer must hold the diff against. Claude reads it from the **base** branch, so a PR cannot rewrite its own reviewer's instructions. **Codex does not read it in cloud mode** — only `mode: action` does — so copy the same contracts into the repo's `AGENTS.md`, under 2 KB. A repo with no `AGENTS.md` gets a `CODEX-REVIEW: PASS` that means "Codex found nothing", not "Codex checked our rules" (verified 2026-09-17 on `camedu-io/district-intel` and `crm`, which had neither).
 2. Secrets, before the PR. Values live once in a gitignored env file (default `EVAN_WORKSPACE/.env`, line `CLAUDE_CODE_OAUTH_TOKEN=`); the helper pushes them by name with `gh secret set --body` and never prints them:
 
 ```powershell
