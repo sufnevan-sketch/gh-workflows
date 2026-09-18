@@ -17,7 +17,7 @@ Each repo keeps only thin stubs under `.github/workflows/` that call the workflo
 | `.github/workflows/self-check.yml` | this repo's CI: actionlint on workflows and stubs, stub references resolve, script bodies parse |
 | `.github/workflows/self-review.yml` | this repo dogfoods `claude-review` + `codex-review` on its own PRs |
 | `stubs/*.yml` | what a calling repo gets: triggers + `uses:` + inputs, nothing else |
-| `stubs/review-context.md` | starter for the one per-repo file the reviewers read |
+| `stubs/review-context.md` | starter for the per-repo file **Claude** reads; Codex cloud mode reads the repo's `AGENTS.md` instead |
 | `stubs/pull_request_template.md` | PR body written for a reader who does not read code |
 | `install.ps1` | copies the stubs into a repo, fills the ci inputs |
 | `set-secrets.ps1` | pushes named secrets from a gitignored env file to the repo with `gh secret set --body`; values never printed |
@@ -30,7 +30,7 @@ pwsh install.ps1 -Repo <repo-root> -Setup none|node-pnpm|node-npm|python -Verify
 
 Then in the repo:
 
-1. Fill `.github/review-context.md`: one paragraph of what the repo is, its stack, and the contracts a reviewer must hold the diff against. Both reviewers read it from the **base** branch, so a PR cannot rewrite its own reviewer's instructions.
+1. Fill `.github/review-context.md`: one paragraph of what the repo is, its stack, and the contracts a reviewer must hold the diff against. Claude reads it from the **base** branch, so a PR cannot rewrite its own reviewer's instructions. **Codex does not read it in cloud mode** — only `mode: action` does — so copy the same contracts into the repo's `AGENTS.md`, under 2 KB. A repo with no `AGENTS.md` gets a `CODEX-REVIEW: PASS` that means "Codex found nothing", not "Codex checked our rules" (verified 2026-09-17 on `camedu-io/district-intel` and `crm`, which had neither).
 2. Secrets, before the PR. Values live once in a gitignored env file (default `EVAN_WORKSPACE/.env`, line `CLAUDE_CODE_OAUTH_TOKEN=`); the helper pushes them by name with `gh secret set --body` and never prints them:
 
 ```powershell
@@ -64,7 +64,7 @@ So each stub passes what its callee declares, by name:
 
 Naming a secret the repo has not set is safe: it resolves empty, and a callee that declares it `required: false` runs anyway. Naming one the callee does not declare is a hard config error, which is why `auto-merge.yml` must stay bare. `self-review.yml` keeps `inherit` because it calls workflows in this same repo.
 
-Per-repo variance is exactly: the ci stub's `setup` / `verify` (and `working-directory` for wrapper repos), and `review-context.md`. Everything else is here.
+Per-repo variance is exactly: the ci stub's `setup` / `verify` (and `working-directory` for wrapper repos), `review-context.md` for Claude, and `AGENTS.md` for Codex cloud mode, both carrying the same contracts. Everything else is here.
 
 ## Check names
 

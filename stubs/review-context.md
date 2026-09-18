@@ -1,4 +1,7 @@
-<!-- Project context for the Claude and Codex PR reviewers. Read from the base branch, so a PR cannot edit its own reviewer's instructions. One short paragraph plus the contracts. Replace everything below. -->
+<!-- Project context for the Claude PR reviewer. Read from the base branch, so a PR cannot edit its own reviewer's instructions.
+     Codex does NOT read this file in the default cloud mode: it reads the repo's AGENTS.md (2 KB cap). Only codex-review's
+     `mode: action` loads this one. Give a repo BOTH, with the same contracts, or Codex reviews with none of them.
+     One short paragraph plus the contracts. Replace everything below. -->
 
 This repo is <what it is, for whom>. Stack: <languages, frameworks, runtime>. Verify command: <the one command>.
 
