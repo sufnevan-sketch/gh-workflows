@@ -42,11 +42,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      # claude-code-action refuses to run when the PR changes any workflow file
+      # ("Workflow validation failed ... identical content to the default
+      # branch"): a PR must not be able to rewrite its own reviewer. Such PRs are
+      # hand-merged anyway (the gate skips them), so report it plainly instead
+      # of failing the verdict gate with "no verdict".
+      - name: Workflow-changing PR?
+        id: wf
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          n=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" --jq '[.[] | select(.filename | startswith(".github/workflows/"))] | length')
+          echo "changed=$([ "${n:-0}" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          if [ "${n:-0}" -gt 0 ]; then
+            echo "::warning::PR #${PR} changes ${n} workflow file(s); claude-code-action cannot review it and the merge gate will not auto-merge it. Review and merge by hand."
+          fi
+
+      - if: steps.wf.outputs.changed != 'true'
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Read project context from the base branch
+        if: steps.wf.outputs.changed != 'true'
         id: ctx
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -61,6 +80,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Claude reviews the PR
+        if: steps.wf.outputs.changed != 'true'
         id: review
         uses: anthropics/claude-code-action@v1
         with:
@@ -120,6 +140,7 @@ jobs:
       # Red on CHANGES REQUESTED, red on no verdict (turn budget hit, action
       # error), green only on an explicit PASS for this exact head SHA.
       - name: Verdict gate
+        if: steps.wf.outputs.changed != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
