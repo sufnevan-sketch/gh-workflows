@@ -39,7 +39,7 @@ gh secret list --repo <owner>/<repo>
 ```
 
    `CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token` (interactive, run it yourself). Do not run `gh secret set` interactively from a non-TTY tool: it stores an empty value silently.
-3. Codex (cloud mode, the default, no API key): in chatgpt.com → Codex → Settings → Code review, the GitHub connector must be installed for the repo's owner and the repo must appear in the list; keep personal **Auto review OFF** so Codex reviews only the PRs this workflow asks about (`@codex review`), never business PRs. Codex reads the repo's `AGENTS.md`, so repo contracts for Codex go there (2 KB cap). `OPENAI_API_KEY` is needed only with `mode: action`.
+3. Codex (cloud mode, the default, no API key): in chatgpt.com → Codex → Settings → Code review, the GitHub connector must be installed for the repo's owner and the repo must appear in the list; keep personal **Auto review OFF** so Codex reviews only the PRs this workflow asks about (`@codex review`), never business PRs. The ask must come from a human account connected to Codex: Codex ignores mentions by `github-actions[bot]` (verified 2026-09-17), so the secret `CODEX_TRIGGER_PAT` is required: a GitHub PAT of the connected user with permission to comment on the repo (fine-grained: Pull requests read/write + Issues read/write on the chosen repos, or classic `repo`). One PAT can cover every installed repo; push it with `set-secrets.ps1 -Names CLAUDE_CODE_OAUTH_TOKEN,CODEX_TRIGGER_PAT`. Codex reads the repo's `AGENTS.md`, so repo contracts for Codex go there (2 KB cap). `OPENAI_API_KEY` is needed only with `mode: action`.
 4. Commit `.github/` on a `docs/` branch and open the PR. The gate never auto-merges a PR that touches `.github/workflows/**`, so merge this one by hand; it is the smoke test for `ci / verify` and `claude / claude-review`. A second PR on a `fix/` branch exercises Codex and the gate.
 
 Per-repo variance is exactly: the ci stub's `setup` / `verify` (and `working-directory` for wrapper repos), and `review-context.md`. Everything else is here.
@@ -122,6 +122,8 @@ Fix every CRITICAL/HIGH, run the verify command, commit, push. `synchronize` re-
 Branch (`fix/...` or `feat/...`), PR, let `self-check` and `self-review` run, merge by hand (every PR here touches workflows). Stubs pin `@main`, so the change is live for every repo on its next PR. If a change must roll out gradually, tag a release (`v1`) and install stubs with `-Ref v1`.
 
 ## Verdict log
+
+- [2026-09-17] sufnevan-sketch/evan-workspace PR #3 (fix/ branch) | `ci / *` green; `claude / claude-review` PASS in 3m56s with one real inline MEDIUM (BOM bytes uncounted), fixed in the next push; `gate / auto-merge` ran and correctly waited on Codex; `codex / codex-review` (cloud) got the bot reply "To use Codex here, create a Codex account and connect to github" | Lessons: (1) Codex ignores `@codex review` from `github-actions[bot]`; `CODEX_TRIGGER_PAT` is required, now fail-fast. (2) claude-code-action skips any PR that changes a workflow file; install PRs are hand-merge, now reported as a warning instead of "no verdict".
 
 One line per install: `[YYYY-MM-DD] <repo> | <what happened on the smoke-test PRs> | <lesson, if any>`.
 

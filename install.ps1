@@ -63,10 +63,11 @@ Write-Host ""
 Write-Host "Edit before committing:"
 Write-Host "  .github/review-context.md   -> one paragraph of project context + the contracts reviewers must hold the diff against"
 Write-Host ""
-$names = if ($WithAutoFix) { 'CLAUDE_CODE_OAUTH_TOKEN,AUTOFIX_PAT' } else { 'CLAUDE_CODE_OAUTH_TOKEN' }
+$names = if ($WithAutoFix) { 'CLAUDE_CODE_OAUTH_TOKEN,CODEX_TRIGGER_PAT,AUTOFIX_PAT' } else { 'CLAUDE_CODE_OAUTH_TOKEN,CODEX_TRIGGER_PAT' }
 Write-Host "Secrets (values in the gitignored env file, pushed by name, never printed):"
 Write-Host "  pwsh $PSScriptRoot\set-secrets.ps1 -Repo $name -Names $names"
 Write-Host "    CLAUDE_CODE_OAUTH_TOKEN <- claude setup-token (interactive, your terminal)"
+Write-Host "    CODEX_TRIGGER_PAT       <- GitHub PAT of your Codex-connected user (comments '@codex review'; bots are ignored)"
 if ($WithAutoFix) { Write-Host "    AUTOFIX_PAT             <- fine-grained PAT: Contents + Pull requests RW on this repo" }
 Write-Host "  gh secret list --repo $name                              # names + dates only"
 Write-Host ""

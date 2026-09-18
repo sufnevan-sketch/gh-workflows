@@ -51,7 +51,7 @@ on:
       OPENAI_API_KEY:
         required: false
       CODEX_TRIGGER_PAT:
-        description: "cloud, optional: PAT used to post the trigger comment if Codex ignores comments by github-actions[bot]"
+        description: "cloud: PAT of a GitHub user connected to Codex. Codex ignores @codex mentions from github-actions[bot] (verified 2026-09-17: it replies 'create a Codex account and connect to github')."
         required: false
 
 permissions:
@@ -81,9 +81,14 @@ jobs:
       - name: Ask Codex for a review (cloud)
         if: inputs.mode == 'cloud'
         env:
-          GH_TOKEN: ${{ secrets.CODEX_TRIGGER_PAT || github.token }}
+          GH_TOKEN: ${{ secrets.CODEX_TRIGGER_PAT }}
+          PAT_SET: ${{ secrets.CODEX_TRIGGER_PAT != '' }}
           TRIGGER: ${{ inputs.trigger-comment }}
         run: |
+          if [ "$PAT_SET" != "true" ]; then
+            echo "::error::Secret CODEX_TRIGGER_PAT is not set. Codex cloud review only honors '@codex review' from a GitHub user connected to Codex, never from github-actions[bot]. Set it (set-secrets.ps1 -Names CODEX_TRIGGER_PAT) or switch the stub to mode: action."
+            exit 1
+          fi
           # Idempotent per head SHA: skip if Codex already reviewed this commit.
           have=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews?per_page=100" \
             --jq '[.[] | select(.user.login == env.CODEX_BOT and .commit_id == env.HEAD_SHA)] | length')
@@ -104,7 +109,7 @@ jobs:
               --jq '[.[] | select(.user.login == env.CODEX_BOT and .commit_id == env.HEAD_SHA)] | length')
             if [ "${n:-0}" -gt 0 ]; then break; fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "::error::No Codex review on ${HEAD_SHA:0:7} after ${WAIT_MIN} min. Is the Codex GitHub connector installed for this owner and the repo listed in Codex settings? Does Codex accept a trigger comment from github-actions[bot] (set CODEX_TRIGGER_PAT if not)?"
+              echo "::error::No Codex review on ${HEAD_SHA:0:7} after ${WAIT_MIN} min. Is the Codex GitHub connector installed for this owner, the repo listed in Codex settings, and CODEX_TRIGGER_PAT a user connected to Codex?"
               exit 1
             fi
             sleep 30
