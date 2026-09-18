@@ -26,6 +26,7 @@ jobs:
       - name: actionlint (stubs, as a caller repo would see them)
         run: |
           mkdir -p /tmp/caller/.github/workflows
+          git init -q /tmp/caller # actionlint refuses to lint outside a git project
           cp stubs/*.yml /tmp/caller/.github/workflows/
           docker run --rm -v "/tmp/caller:/repo" -w /repo rhysd/actionlint:latest -color
 
