@@ -3,7 +3,10 @@
 # touches .github/workflows/**, which the gate refuses on principle, so PRs
 # here are merged by hand after the reviews are green.
 #
-# Secrets needed on this repo: CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY.
+# Secrets needed on this repo: CLAUDE_CODE_OAUTH_TOKEN and CODEX_TRIGGER_PAT
+# (cloud mode needs no API key; OPENAI_API_KEY only if codex switches to
+# mode: action). `inherit` is correct here and only here: these calls are
+# local, so the caller and callee are the same repo.
 name: self-review
 
 on:
