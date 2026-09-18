@@ -18,9 +18,8 @@ Each repo keeps only thin stubs under `.github/workflows/` that call the workflo
 | `.github/workflows/self-review.yml` | this repo dogfoods `claude-review` + `codex-review` on its own PRs |
 | `stubs/*.yml` | what a calling repo gets: triggers + `uses:` + inputs, nothing else |
 | `stubs/review-context.md` | starter for the per-repo file **Claude** reads |
-| `stubs/AGENTS.md` | starter for the repo-root file **Codex** reads in cloud mode, and the only one it reads |
 | `stubs/pull_request_template.md` | PR body written for a reader who does not read code |
-| `install.ps1` | copies the stubs into a repo, seeds both reviewer-context files, fills the ci inputs |
+| `install.ps1` | copies the stubs into a repo, fills the ci inputs, warns if the repo has no `AGENTS.md` |
 | `set-secrets.ps1` | pushes named secrets from a gitignored env file to the repo with `gh secret set --body`; values never printed |
 
 ## Install into a repo
@@ -31,7 +30,7 @@ pwsh install.ps1 -Repo <repo-root> -Setup none|node-pnpm|node-npm|python -Verify
 
 Then in the repo:
 
-1. Fill `.github/review-context.md`: one paragraph of what the repo is, its stack, and the contracts a reviewer must hold the diff against. Claude reads it from the **base** branch, so a PR cannot rewrite its own reviewer's instructions. **Codex does not read it in cloud mode** — only `mode: action` does — so put the same contracts in the repo-root `AGENTS.md`, under 2 KB. `install.ps1` seeds a starter for each and overwrites neither, even with `-Force`. A repo with no `AGENTS.md` gets a `CODEX-REVIEW: PASS` that means "Codex found nothing", not "Codex checked our rules" (verified 2026-09-17 on `camedu-io/district-intel` and `crm`, which had neither).
+1. Fill `.github/review-context.md`: one paragraph of what the repo is, its stack, and the contracts a reviewer must hold the diff against. Claude reads it from the **base** branch, so a PR cannot rewrite its own reviewer's instructions. **Codex does not read it in cloud mode** — only `mode: action` does — it reads the repo-root `AGENTS.md`, under 2 KB. A repo with no `AGENTS.md` gets a `CODEX-REVIEW: PASS` that means "Codex found nothing", not "Codex checked our rules" (verified 2026-09-17 on `camedu-io/district-intel` and `crm`, which had neither), so `install.ps1` warns when it is absent. It does not write one: `AGENTS.md` is the repo's own file, describing rules that exist whether or not this CI is installed, and in many repos `CLAUDE.md` includes it. A CI installer authoring it would push review wording into every agent session that reads it.
 2. Secrets, before the PR. Values live once in a gitignored env file (default `EVAN_WORKSPACE/.env`, line `CLAUDE_CODE_OAUTH_TOKEN=`); the helper pushes them by name with `gh secret set --body` and never prints them:
 
 ```powershell
