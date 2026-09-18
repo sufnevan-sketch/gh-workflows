@@ -13,6 +13,7 @@ param(
   [Parameter(Mandatory)] [string] $Repo,
   [ValidateSet('none', 'node-pnpm', 'node-npm', 'python')] [string] $Setup = 'none',
   [string] $Verify = 'pwsh scripts/verify.ps1',
+  [string] $WorkingDirectory = '',   # subfolder the setup + verify steps run in (wrapper repos, e.g. web)
   [string] $Ref = 'main',      # gh-workflows ref the stubs pin: main (rolling) or a tag
   [switch] $WithAutoFix,       # also install auto-fix.yml (needs AUTOFIX_PAT secret)
   [switch] $Force              # overwrite stubs / PR template that already exist (review-context.md is never overwritten)
@@ -37,7 +38,10 @@ foreach ($s in $stubs) {
   if ((Test-Path -LiteralPath $to) -and -not $Force) { $skipped += "workflows/$s"; continue }
   $txt = [IO.File]::ReadAllText((Join-Path $src "stubs/$s"))
   $txt = $txt -replace '@main\b', "@$Ref"
-  if ($s -eq 'ci.yml') { $txt = $txt.Replace('__SETUP__', $Setup).Replace('__VERIFY__', $Verify) }
+  if ($s -eq 'ci.yml') {
+    $txt = $txt.Replace('__SETUP__', $Setup).Replace('__VERIFY__', $Verify)
+    if ($WorkingDirectory) { $txt = $txt -replace '(?m)^\s*# working-directory: web.*$', "      working-directory: $WorkingDirectory" }
+  }
   Write-Lf $to $txt
   $copied += "workflows/$s"
 }
@@ -54,7 +58,7 @@ $name = try { (git -C $Repo remote get-url origin) -replace '^.*github\.com[:/]'
 
 Write-Host "Copied  : $($copied -join ', ')"
 if ($skipped) { Write-Host "Skipped : $($skipped -join ', ')" }
-Write-Host "ci stub : setup=$Setup  verify=`"$Verify`"  ref=@$Ref"
+Write-Host "ci stub : setup=$Setup  verify=`"$Verify`"  ref=@$Ref$(if ($WorkingDirectory) { "  working-directory=$WorkingDirectory" })"
 Write-Host ""
 Write-Host "Edit before committing:"
 Write-Host "  .github/review-context.md   -> one paragraph of project context + the contracts reviewers must hold the diff against"
