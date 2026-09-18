@@ -1,0 +1,169 @@
+# codex-review.yml (reusable) — second, cross-family review by Codex for code
+# work only. Check name: "codex / codex-review".
+#
+# Runs when the head branch type (branch-name skill: `<type>/<short-description>`)
+# says this is code: feat/ fix/ refactor/ perf/ build/. Business and housekeeping
+# branches (docs/ chore/ spike/ wo/ and area-named branches) skip it unless the
+# PR carries the label `codex-review` or `risk:high`. auto-merge.yml applies the
+# same rule and then requires this check to pass (its codex-branch-prefixes /
+# codex-labels inputs; keep the two lists identical).
+#
+# Read-only sandbox, no network: Codex reads the diff and posts ONE review whose
+# first line is `CODEX-REVIEW: PASS` or `CODEX-REVIEW: CHANGES REQUESTED`; the
+# job goes red on CHANGES REQUESTED so it is an ordinary check.
+#
+# Project context: the calling repo's .github/review-context.md, read from the
+# BASE branch so a PR cannot rewrite its own reviewer's instructions.
+name: Codex Review (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      context-file:
+        type: string
+        default: .github/review-context.md
+      model:
+        description: "Codex model; blank = Codex default. Default matches the solo-harness evaluator of Claude's work."
+        type: string
+        default: gpt-6-astra
+      effort:
+        type: string
+        default: high
+    secrets:
+      OPENAI_API_KEY:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  codex-review:
+    name: codex-review
+    if: >-
+      !github.event.pull_request.draft && (
+        startsWith(github.head_ref, 'feat/') ||
+        startsWith(github.head_ref, 'fix/') ||
+        startsWith(github.head_ref, 'refactor/') ||
+        startsWith(github.head_ref, 'perf/') ||
+        startsWith(github.head_ref, 'build/') ||
+        contains(github.event.pull_request.labels.*.name, 'codex-review') ||
+        contains(github.event.pull_request.labels.*.name, 'risk:high'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          persist-credentials: false
+
+      - name: Fetch base and head refs
+        env:
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: git fetch --no-tags origin "$PR_BASE_REF" "+refs/pull/$PR_NUMBER/head"
+
+      - name: Read project context from the base branch
+        id: ctx
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          CONTEXT_FILE: ${{ inputs.context-file }}
+        run: |
+          {
+            echo "text<<CTX_EOF"
+            git show "origin/${BASE_REF}:${CONTEXT_FILE}" 2>/dev/null \
+              || echo "(no ${CONTEXT_FILE} on ${BASE_REF}; review against general best practice and the repo's own AGENTS.md / CLAUDE.md if present)"
+            echo
+            echo "CTX_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Codex reviews the PR
+        id: codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          safety-strategy: read-only
+          model: ${{ inputs.model }}
+          effort: ${{ inputs.effort }}
+          output-schema: |
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["verdict", "summary", "findings"],
+              "properties": {
+                "verdict": { "type": "string", "enum": ["PASS", "CHANGES REQUESTED"] },
+                "summary": { "type": "string" },
+                "findings": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["severity", "path", "line", "problem", "fix"],
+                    "properties": {
+                      "severity": { "type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"] },
+                      "path": { "type": "string" },
+                      "line": { "type": "integer" },
+                      "problem": { "type": "string" },
+                      "fix": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          prompt: |
+            You are the second, independent reviewer of PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+            A Claude review has already run or is running; do not assume it caught anything. Review ONLY the changes this PR introduces:
+              git diff ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
+              git log --oneline ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
+
+            Project context (from the repo's ${{ inputs.context-file }}):
+            ${{ steps.ctx.outputs.text }}
+
+            Look for, in priority order:
+            1. Correctness bugs: logic errors, broken edge cases, swallowed errors, race conditions, stray debug output, secrets in the diff.
+            2. Unmet acceptance criteria: what the PR title and body promise that the diff does not deliver.
+            3. Security and data safety: injection, auth bypass, data loss, unsafe defaults.
+            4. Missing tests for genuine logic. Do not demand tests for glue or config.
+
+            Severity: CRITICAL = security hole, data loss, leaked secret. HIGH = real bug or unmet criterion. MEDIUM = maintainability. LOW = style.
+            Verdict: PASS when there is no CRITICAL or HIGH finding; otherwise CHANGES REQUESTED.
+            Be specific: exact path and line in the head commit, what is wrong, how to fix. Skip praise and nits. If nothing is worth flagging, return PASS with an empty findings list and say so; do not manufacture findings.
+
+            PR title and body:
+            ----
+            ${{ github.event.pull_request.title }}
+            ${{ github.event.pull_request.body }}
+
+      # Post the verdict as ONE review (comment, never approve/request-changes),
+      # inline comments where the line is in the diff, then go red or green.
+      - name: Post review and gate on verdict
+        uses: actions/github-script@v7
+        env:
+          CODEX_FINAL_MESSAGE: ${{ steps.codex.outputs.final-message }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const number = context.payload.pull_request.number;
+            let out;
+            try { out = JSON.parse(process.env.CODEX_FINAL_MESSAGE || ""); }
+            catch (e) { core.setFailed(`Codex produced no parseable verdict: ${(process.env.CODEX_FINAL_MESSAGE || "").slice(0, 500)}`); return; }
+            const verdict = out.verdict === "PASS" ? "PASS" : "CHANGES REQUESTED";
+            const findings = Array.isArray(out.findings) ? out.findings : [];
+            const lines = [`CODEX-REVIEW: ${verdict}`, "", out.summary || ""];
+            if (findings.length) {
+              lines.push("", "Findings:");
+              findings.forEach((f, i) => lines.push(`${i + 1}. ${f.path}:${f.line} - ${f.severity}: ${f.problem} Fix: ${f.fix}`));
+            }
+            const body = lines.join("\n");
+            const comments = findings
+              .filter(f => ["CRITICAL", "HIGH"].includes(f.severity) && f.path && f.line > 0)
+              .map(f => ({ path: f.path, line: f.line, side: "RIGHT", body: `${f.severity}: ${f.problem}\n\nFix: ${f.fix}` }));
+            const post = async (withInline) => github.rest.pulls.createReview({
+              owner, repo, pull_number: number, commit_id: process.env.HEAD_SHA, event: "COMMENT", body,
+              ...(withInline && comments.length ? { comments } : {}),
+            });
+            try { await post(true); }
+            catch (e) { core.warning(`inline comments rejected (${e.message}); posting summary only`); await post(false); }
+            core.summary.addRaw(body).write();
+            if (verdict !== "PASS") core.setFailed(`Codex requested changes: ${findings.filter(f => ["CRITICAL", "HIGH"].includes(f.severity)).length} CRITICAL/HIGH finding(s)`);

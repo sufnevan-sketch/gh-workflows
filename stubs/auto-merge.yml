@@ -1,0 +1,29 @@
+# Stub. The real gate lives in sufnevan-sketch/gh-workflows. The `workflows:`
+# names below are the `name:` of the ci, claude-review, and codex-review stubs;
+# keep them in sync. Kill switch: delete this file. Check name: "gate / auto-merge".
+name: auto-merge
+
+on:
+  workflow_run:
+    workflows: ["CI", "Claude Code Review", "Codex Review"]
+    types: [completed]
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch: # drain: re-evaluate every open PR
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  actions: read
+
+concurrency:
+  group: auto-merge-${{ github.event.workflow_run.head_sha || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    uses: sufnevan-sketch/gh-workflows/.github/workflows/auto-merge.yml@main
+    # with:
+    #   skip-branch-prefixes: "wo/"
+    #   delete-branch: true

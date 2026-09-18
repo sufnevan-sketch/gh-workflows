@@ -1,0 +1,25 @@
+# Stub. The real workflow lives in sufnevan-sketch/gh-workflows; edit inputs
+# here, logic there. Check names: "ci / branch-name", "ci / verify".
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    uses: sufnevan-sketch/gh-workflows/.github/workflows/ci.yml@main
+    with:
+      setup: __SETUP__ # none | node-pnpm | node-npm | python
+      verify: __VERIFY__
+      # working-directory: web        # wrapper repos whose code lives in a subfolder
+      # artifact-path: playwright-report/

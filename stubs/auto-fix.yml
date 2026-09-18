@@ -1,0 +1,22 @@
+# Stub, OPT-IN (install.ps1 -WithAutoFix). Claude fixes CHANGES REQUESTED in CI,
+# max 3 rounds. Needs secret AUTOFIX_PAT; with it unset every step is skipped.
+name: auto-fix
+
+on:
+  workflow_run:
+    workflows: ["Claude Code Review"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: auto-fix-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    uses: sufnevan-sketch/gh-workflows/.github/workflows/auto-fix.yml@main
+    secrets: inherit

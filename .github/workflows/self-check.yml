@@ -1,0 +1,59 @@
+# self-check.yml — this repo's own CI: lint every workflow with actionlint,
+# parse every YAML, syntax-check the github-script bodies, and make sure each
+# stub still points at a reusable workflow that exists here.
+name: self-check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: actionlint (reusable workflows)
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color
+
+      - name: actionlint (stubs, as a caller repo would see them)
+        run: |
+          mkdir -p /tmp/caller/.github/workflows
+          cp stubs/*.yml /tmp/caller/.github/workflows/
+          docker run --rm -v "/tmp/caller:/repo" -w /repo rhysd/actionlint:latest -color
+
+      - name: Stubs reference workflows that exist
+        run: |
+          fail=0
+          for s in stubs/*.yml; do
+            for ref in $(grep -oE 'sufnevan-sketch/gh-workflows/\.github/workflows/[a-z-]+\.yml' "$s" | sort -u); do
+              f=".github/workflows/${ref##*/}"
+              if [ -f "$f" ]; then echo "ok  $s -> $f"; else echo "::error::$s references missing $f"; fail=1; fi
+            done
+          done
+          exit $fail
+
+      - name: github-script bodies parse
+        run: |
+          python3 - <<'PY'
+          import yaml, subprocess, tempfile, os, sys, glob
+          bad = 0
+          for f in glob.glob('.github/workflows/*.yml'):
+              d = yaml.safe_load(open(f, encoding='utf-8'))
+              for job in d.get('jobs', {}).values():
+                  for step in job.get('steps', []):
+                      s = (step.get('with') or {}).get('script')
+                      if not s: continue
+                      p = tempfile.mktemp(suffix='.js')
+                      open(p, 'w', encoding='utf-8').write("async function main(github,context,core){\n" + s + "\n}")
+                      r = subprocess.run(['node', '--check', p], capture_output=True, text=True); os.remove(p)
+                      print(f, 'node --check:', 'OK' if r.returncode == 0 else r.stderr[:400]); bad |= r.returncode != 0
+          sys.exit(bad)
+          PY

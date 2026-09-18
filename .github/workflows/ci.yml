@@ -1,0 +1,119 @@
+# ci.yml (reusable) — the calling repo's single verification gate.
+#
+# Called from a repo's .github/workflows/ci.yml stub (stubs/ci.yml). Two jobs:
+#   branch-name  fails a PR whose head branch is not <type>/<short-description>
+#                (branch-name skill). The Codex review is keyed on the type, so a
+#                stray name must fail loudly instead of skipping Codex silently.
+#   verify       optional toolchain setup, then the repo's one verify command.
+# Check names seen by the gate: "ci / branch-name", "ci / verify" (stub job id
+# `ci` + these job ids).
+#
+# Keep verify offline: no live services, no secrets. Green must mean "every
+# gate passed", never "gate skipped".
+name: CI (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      setup:
+        description: "Toolchain before verify: none | node-pnpm | node-npm | python"
+        type: string
+        default: none
+      verify:
+        description: "The one verify command (lint + typecheck + tests + build)"
+        type: string
+        default: pwsh scripts/verify.ps1
+      working-directory:
+        description: "Directory the setup and verify steps run in (e.g. web for a wrapper repo)"
+        type: string
+        default: "."
+      node-version:
+        type: string
+        default: "22"
+      pnpm-version:
+        type: string
+        default: "10"
+      python-version:
+        type: string
+        default: "3.11"
+      python-install:
+        description: "Install command when setup=python"
+        type: string
+        default: pip install -e '.[dev]'
+      timeout-minutes:
+        type: number
+        default: 25
+      artifact-path:
+        description: "Path uploaded on failure (e.g. playwright-report/); empty = none"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  branch-name:
+    name: branch-name
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [[ "$HEAD_REF" =~ ^[a-z0-9-]+/[a-z0-9][a-z0-9-]*$ ]]; then
+            echo "ok: $HEAD_REF"
+          else
+            echo "::error::Branch '$HEAD_REF' is not <type>/<short-description> (lowercase, hyphens). Types: feat fix chore refactor docs perf build spike, or an area name. Rename: git branch -m <type>/<short-description> && git push -u origin HEAD"
+            exit 1
+          fi
+
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - if: inputs.setup == 'node-pnpm'
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+      - if: inputs.setup == 'node-pnpm'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+          cache-dependency-path: ${{ inputs.working-directory }}/pnpm-lock.yaml
+      - if: inputs.setup == 'node-pnpm'
+        run: pnpm install --frozen-lockfile
+
+      - if: inputs.setup == 'node-npm'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+      - if: inputs.setup == 'node-npm'
+        run: npm ci
+
+      - if: inputs.setup == 'python'
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python-version }}
+      - if: inputs.setup == 'python'
+        run: ${{ inputs.python-install }}
+
+      - name: Verify
+        run: ${{ inputs.verify }}
+
+      - name: Upload failure artifact
+        if: failure() && inputs.artifact-path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-report
+          path: ${{ inputs.working-directory }}/${{ inputs.artifact-path }}
+          retention-days: 7

@@ -1,0 +1,21 @@
+# Stub. The real workflow lives in sufnevan-sketch/gh-workflows. Runs only on
+# feat/ fix/ refactor/ perf/ build/ branches or with label codex-review /
+# risk:high. Check name: "codex / codex-review".
+name: Codex Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened, labeled]
+
+concurrency:
+  group: codex-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  codex:
+    uses: sufnevan-sketch/gh-workflows/.github/workflows/codex-review.yml@main
+    secrets: inherit

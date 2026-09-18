@@ -1,0 +1,105 @@
+# auto-fix.yml (reusable) — OPT-IN. Claude implements the review's requested
+# changes in CI, up to 3 times, instead of a local Claude Code session doing it.
+#
+# Default loop (no stub for this file): claude-review goes red -> the local
+# Claude Code session reads the findings, fixes, pushes -> review re-runs ->
+# green -> auto-merge. Install the stub only when nobody is at a keyboard.
+#
+# Requires the secret AUTOFIX_PAT (fine-grained PAT, Contents + Pull requests
+# read/write on the calling repo). GITHUB_TOKEN cannot be used: a push made with
+# it does not re-trigger CI or the review, which would break the loop. With the
+# secret unset every step is skipped (safe failure mode).
+#
+# Bounded: stops after 3 `[auto-fix]` commits on the branch and hands to a human.
+# Same-repo PR branches only.
+name: auto-fix (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      max-iterations:
+        type: number
+        default: 3
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+      AUTOFIX_PAT:
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  fix:
+    name: auto-fix
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # `secrets` is not readable in `if:`; surface presence as an env flag.
+      PAT_SET: ${{ secrets.AUTOFIX_PAT != '' }}
+      MAX_ITER: ${{ inputs.max-iterations }}
+    steps:
+      - name: Locate the PR for this head SHA
+        id: pr
+        if: env.PAT_SET == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          pr=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" \
+            --jq '[.[] | select(.head.sha == env.HEAD_SHA and .head.repo.full_name == env.GITHUB_REPOSITORY and .draft == false)] | first // empty | "\(.number) \(.head.ref) \(.base.ref)"')
+          if [ -z "$pr" ]; then echo "no open same-repo PR at ${HEAD_SHA:0:7}; nothing to fix"; exit 0; fi
+          set -- $pr
+          echo "number=$1" >> "$GITHUB_OUTPUT"; echo "head=$2" >> "$GITHUB_OUTPUT"; echo "base=$3" >> "$GITHUB_OUTPUT"
+          echo "PR #$1 ($2 -> $3)"
+
+      - name: Checkout PR branch (PAT so the fix push re-triggers CI + review)
+        if: steps.pr.outputs.number != ''
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.AUTOFIX_PAT }}
+          ref: ${{ steps.pr.outputs.head }}
+          fetch-depth: 0
+
+      - name: Count prior auto-fix iterations
+        id: gate
+        if: steps.pr.outputs.number != ''
+        env:
+          BASE_REF: ${{ steps.pr.outputs.base }}
+        run: |
+          git fetch origin "$BASE_REF" --depth=50 || true
+          n=$(git log --format='%s' "origin/${BASE_REF}..HEAD" | grep -c '\[auto-fix\]' || true)
+          echo "count=${n:-0}" >> "$GITHUB_OUTPUT"
+          if [ "${n:-0}" -ge "$MAX_ITER" ]; then echo "stop=true" >> "$GITHUB_OUTPUT"; else echo "stop=false" >> "$GITHUB_OUTPUT"; fi
+          echo "auto-fix iterations so far: ${n:-0} (max $MAX_ITER)"
+
+      - name: Give up after the bound
+        if: steps.pr.outputs.number != '' && steps.gate.outputs.stop == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AUTOFIX_PAT }}
+        run: |
+          gh pr comment "${{ steps.pr.outputs.number }}" --body \
+            "🤖 auto-fix stopped after ${MAX_ITER} iterations without an AUTO-REVIEW: PASS. This PR needs a human."
+
+      - name: Claude implements the requested fixes
+        if: steps.pr.outputs.number != '' && steps.gate.outputs.stop == 'false'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.AUTOFIX_PAT }}
+          additional_permissions: |
+            actions: read
+          prompt: |
+            The automated reviewer left an `AUTO-REVIEW: CHANGES REQUESTED` verdict on PR #${{ steps.pr.outputs.number }} in ${{ github.repository }}. You are checked out on its branch `${{ steps.pr.outputs.head }}`.
+            1. Read the latest review body and all inline review comments:
+               gh pr view ${{ steps.pr.outputs.number }} --comments
+               gh api repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/reviews
+               gh api repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/comments
+            2. Implement a fix for EVERY CRITICAL/HIGH finding. Keep changes minimal and scoped strictly to the findings; do not refactor unrelated code.
+            3. Run the repo's verify command if one exists (scripts/verify.ps1, package.json scripts, pytest) and make it pass.
+            4. Commit on the current branch with a message that INCLUDES the marker `[auto-fix]`, then `git push origin HEAD:${{ steps.pr.outputs.head }}` (do NOT open a new PR).
+            If a finding is a false positive, reply to it explaining why instead of changing code, but still commit any real fixes.
+          claude_args: '--max-turns 100 --allowed-tools "Bash(gh *),Bash(git *),Bash(pwsh *),Bash(npm *),Bash(pnpm *),Bash(pytest *),Edit,Write,Read,Grep,Glob"'

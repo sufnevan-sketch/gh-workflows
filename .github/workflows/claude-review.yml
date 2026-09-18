@@ -1,0 +1,135 @@
+# claude-review.yml (reusable) — Claude reviews every non-draft PR of the calling
+# repo, and the job goes red or green on its verdict, so the review is an
+# ordinary check that auto-merge.yml (and `gh pr checks --watch` in a local
+# Claude Code session) can wait on. Check name: "claude / claude-review".
+#
+# Verdict transport: Claude ends by submitting ONE `gh pr review --comment` whose
+# first line is exactly `AUTO-REVIEW: PASS` or `AUTO-REVIEW: CHANGES REQUESTED`.
+# The "Verdict gate" step reads the latest such review on the head SHA and exits
+# 1 on CHANGES REQUESTED or on no verdict. No PAT needed: the review is posted
+# with the default GITHUB_TOKEN, and auto-merge.yml is chained by `workflow_run`
+# (which fires on workflow completion; GITHUB_TOKEN-authored events do not).
+#
+# Project context comes from the calling repo's .github/review-context.md, read
+# from the BASE branch so a PR cannot rewrite its own reviewer's instructions.
+name: Claude Code Review (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      context-file:
+        description: "Repo-relative file with project context for the reviewer (read from the base branch)"
+        type: string
+        default: .github/review-context.md
+      max-turns:
+        type: number
+        default: 150
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write
+  actions: read
+
+jobs:
+  claude-review:
+    name: claude-review
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read project context from the base branch
+        id: ctx
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          CONTEXT_FILE: ${{ inputs.context-file }}
+        run: |
+          {
+            echo "text<<CTX_EOF"
+            git show "origin/${BASE_REF}:${CONTEXT_FILE}" 2>/dev/null \
+              || echo "(no ${CONTEXT_FILE} on ${BASE_REF}; review against general best practice and the repo's own AGENTS.md / CLAUDE.md if present)"
+            echo
+            echo "CTX_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Claude reviews the PR
+        id: review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # PRs opened by scheduled workflows (bots) would otherwise be refused:
+          # "Workflow initiated by non-human actor".
+          allowed_bots: "github-actions"
+          additional_permissions: |
+            actions: read
+          prompt: |
+            Perform a code review of PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+
+            Project context (from the repo's ${{ inputs.context-file }}):
+            ${{ steps.ctx.outputs.text }}
+
+            Focus, in priority order:
+            1. Correctness bugs: logic errors, broken edge cases, swallowed errors,
+               stray debug output, secrets or credentials in the diff.
+            2. Unmet acceptance criteria: anything the PR description promises
+               that the diff does not deliver.
+            3. Test coverage: genuine logic and acceptance criteria need covering
+               tests; do not demand coverage theater for glue or config.
+            4. Maintainability, only when it will plausibly cause a bug later.
+
+            Severity rubric:
+            - CRITICAL: security hole, data-loss risk, leaked secret (block merge)
+            - HIGH: real bug, unmet acceptance criterion, contract violation
+            - MEDIUM: maintainability concern
+            - LOW: style / minor
+
+            Post findings as inline PR review comments (path:line - SEVERITY: problem.
+            Suggested fix.). Post each inline comment IMMEDIATELY when you confirm a
+            finding, never batch them for the end: the session has a turn budget and
+            unposted findings are lost. Skip praise and style nits.
+
+            Finish by submitting EXACTLY ONE summary review with
+            `gh pr review ${{ github.event.pull_request.number }} --comment --body "..."`
+            (NEVER --approve or --request-changes):
+            - No CRITICAL or HIGH findings  ->  body first line EXACTLY: `AUTO-REVIEW: PASS`
+            - Any CRITICAL or HIGH finding  ->  body first line EXACTLY: `AUTO-REVIEW: CHANGES REQUESTED`,
+              then a numbered list of each finding with file:line and how to fix it.
+            The first line must be one of those two strings verbatim: a merge gate
+            parses it. If nothing is worth flagging, say so plainly. Do not
+            manufacture findings.
+
+            Work synchronously in this single session: never launch background or
+            async agents (this is a headless CI run; the session ends immediately
+            and background work is lost). Read files directly; do not write scratch
+            files. On a large diff, prioritize: new API routes and libs first, then
+            components, then tests. Post as you go so a turn-budget cutoff only
+            truncates the tail.
+          claude_args: |
+            --max-turns ${{ inputs.max-turns }}
+            --disallowedTools "Task"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,mcp__github_comment__update_claude_comment,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),Bash(git branch:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr review:*),Bash(gh pr checks:*),Bash(gh api:*)"
+
+      # Red on CHANGES REQUESTED, red on no verdict (turn budget hit, action
+      # error), green only on an explicit PASS for this exact head SHA.
+      - name: Verdict gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          verdict=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews?per_page=100" \
+            --jq '[.[] | select(.commit_id == env.HEAD_SHA) | (.body // "") | sub("^\\s+"; "") | select(startswith("AUTO-REVIEW:")) | split("\n")[0]] | last // ""')
+          echo "verdict for ${HEAD_SHA:0:7}: '${verdict}'"
+          case "$verdict" in
+            "AUTO-REVIEW: PASS"*) echo "PASS"; exit 0 ;;
+            "AUTO-REVIEW: CHANGES REQUESTED"*) echo "::error::Claude requested changes. See the review on PR #${PR}."; exit 1 ;;
+            *) echo "::error::No AUTO-REVIEW verdict found for head ${HEAD_SHA:0:7}. Treating as not reviewed."; exit 1 ;;
+          esac

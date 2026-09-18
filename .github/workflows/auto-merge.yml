@@ -1,0 +1,162 @@
+# auto-merge.yml (reusable) — squash-merge a PR once every check on its head SHA
+# is green, including the Claude review and, for code branches, the Codex
+# review. Check name: "gate / auto-merge".
+#
+# Why this exists instead of GitHub's own auto-merge: on a private repo on the
+# free plan there is no branch protection and no rulesets, so there are no
+# "required checks", and `gh pr merge --auto` merges INSTANTLY, before CI has
+# run. This workflow is the required check + auto-merge, implemented in a script.
+#
+# Triggers live in the calling repo's stub (stubs/auto-merge.yml): `workflow_run`
+# on CI and both reviews (fires whoever finishes last), `pull_request_review`
+# for a human review, `workflow_dispatch` to drain every open PR. Never use
+# `check_suite`: GitHub does not fire it for suites created by Actions
+# (recursion guard).
+#
+# A PR squash-merges when ALL hold:
+#   1. open, not draft, title/body do not start with BLOCKED, head branch not
+#      under skip-branch-prefixes, same-repo head, touches nothing under
+#      .github/workflows/ (the gate never auto-merges a change to itself).
+#   2. no reviewer has an outstanding CHANGES_REQUESTED.
+#   3. every check run on the head SHA finished success/neutral/skipped, each
+#      name in required-checks is present and succeeded, and codex-check
+#      succeeded when the branch/label rule says Codex applies.
+# The merge uses the caller's GITHUB_TOKEN (terminal action, nothing to cascade).
+# Kill switch: delete the stub, or put BLOCKED at the start of a PR title.
+name: auto-merge (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      required-checks:
+        description: "Comma list of check names that must be present and green"
+        type: string
+        default: "ci / verify,claude / claude-review"
+      codex-check:
+        type: string
+        default: "codex / codex-review"
+      codex-branch-prefixes:
+        description: "Head-branch prefixes where the Codex review is required (same rule as codex-review.yml)"
+        type: string
+        default: "feat/,fix/,refactor/,perf/,build/"
+      codex-labels:
+        type: string
+        default: "codex-review,risk:high"
+      skip-branch-prefixes:
+        description: "Head-branch prefixes the gate leaves alone (solo-harness ship.ps1 merges wo/ itself)"
+        type: string
+        default: "wo/"
+      merge-method:
+        type: string
+        default: squash
+      delete-branch:
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  actions: read
+
+jobs:
+  auto-merge:
+    name: auto-merge
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      REQUIRED_CHECKS: ${{ inputs.required-checks }}
+      CODEX_CHECK: ${{ inputs.codex-check }}
+      CODEX_BRANCH_PREFIXES: ${{ inputs.codex-branch-prefixes }}
+      CODEX_LABELS: ${{ inputs.codex-labels }}
+      SKIP_BRANCH_PREFIXES: ${{ inputs.skip-branch-prefixes }}
+      MERGE_METHOD: ${{ inputs.merge-method }}
+      DELETE_BRANCH: ${{ inputs.delete-branch }}
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const list = v => (v || "").split(",").map(s => s.trim()).filter(Boolean);
+            const REQUIRED = list(process.env.REQUIRED_CHECKS);
+            const SKIP_PREFIXES = list(process.env.SKIP_BRANCH_PREFIXES);
+            const CODEX_PREFIXES = list(process.env.CODEX_BRANCH_PREFIXES);
+            const CODEX_LABELS = list(process.env.CODEX_LABELS);
+            const openPRs = async () => github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 });
+
+            // --- Candidate PR numbers, by trigger ---
+            let prNumbers = [];
+            if (context.eventName === "workflow_run") {
+              const run = context.payload.workflow_run;
+              if (run.conclusion !== "success") { core.info(`${run.name} concluded ${run.conclusion}; nothing to merge`); return; }
+              prNumbers = (run.pull_requests || []).map(p => p.number);
+              if (prNumbers.length === 0) {
+                // pull_requests is often empty; match open PRs by head SHA instead.
+                prNumbers = (await openPRs()).filter(p => p.head.sha === run.head_sha).map(p => p.number);
+              }
+            } else if (context.eventName === "pull_request_review") {
+              prNumbers = [context.payload.pull_request.number];
+            } else {
+              prNumbers = (await openPRs()).map(p => p.number);
+            }
+            if (prNumbers.length === 0) { core.info("no candidate PRs"); return; }
+
+            for (const number of prNumbers) {
+              const tag = `#${number}`;
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+              if (pr.state !== "open") { core.info(`${tag}: not open, skip`); continue; }
+              if (pr.draft) { core.info(`${tag}: draft, skip`); continue; }
+              const blocked = (pr.title || "").trimStart().startsWith("BLOCKED") || (pr.body || "").trimStart().startsWith("BLOCKED");
+              if (blocked) { core.info(`${tag}: BLOCKED marker, skip`); continue; }
+              if (SKIP_PREFIXES.some(p => pr.head.ref.startsWith(p))) { core.info(`${tag}: branch ${pr.head.ref} is merged by its own tooling, skip`); continue; }
+              if (pr.head.repo && pr.head.repo.full_name !== `${owner}/${repo}`) { core.info(`${tag}: fork PR, human merge required, skip`); continue; }
+
+              // --- Safety rail: never auto-merge a PR that edits the CI/gate itself ---
+              const files = await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: number, per_page: 100 });
+              if (files.some(f => f.filename.startsWith(".github/workflows/"))) {
+                core.info(`${tag}: touches .github/workflows/**, human merge required, skip`); continue;
+              }
+
+              // --- Review gate: no outstanding CHANGES_REQUESTED (latest state per reviewer) ---
+              const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: number, per_page: 100 });
+              const latestByUser = new Map();
+              for (const r of reviews) {
+                if (!r.user || !["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(r.state)) continue;
+                latestByUser.set(r.user.login, r);
+              }
+              if ([...latestByUser.values()].some(r => r.state === "CHANGES_REQUESTED")) {
+                core.info(`${tag}: outstanding CHANGES_REQUESTED, skip`); continue;
+              }
+
+              // --- Checks gate: everything on the head SHA green, required ones present ---
+              const checkRuns = await github.paginate(github.rest.checks.listForRef, { owner, repo, ref: pr.head.sha, per_page: 100 });
+              const relevant = checkRuns.filter(c => !c.name.endsWith("auto-merge"));
+              const pending = relevant.filter(c => c.status !== "completed").map(c => c.name);
+              const failed = relevant.filter(c => c.status === "completed" && !["success", "neutral", "skipped"].includes(c.conclusion)).map(c => `${c.name}=${c.conclusion}`);
+              const labels = (pr.labels || []).map(l => l.name);
+              const codexApplies = CODEX_PREFIXES.some(p => pr.head.ref.startsWith(p)) || CODEX_LABELS.some(l => labels.includes(l));
+              const required = codexApplies ? [...REQUIRED, process.env.CODEX_CHECK] : REQUIRED;
+              const missing = required.filter(name => !relevant.some(c => c.name === name && c.conclusion === "success"));
+              if (pending.length || failed.length || missing.length) {
+                core.info(`${tag}: not green on ${pr.head.sha.slice(0, 7)} (pending: [${pending}] failed: [${failed}] required-missing: [${missing}]), skip`); continue;
+              }
+
+              // --- Merge ---
+              try {
+                await github.rest.pulls.merge({
+                  owner, repo, pull_number: number,
+                  merge_method: process.env.MERGE_METHOD,
+                  commit_title: `${pr.title} (#${number})`,
+                  sha: pr.head.sha, // refuse if the head moved since we evaluated it
+                });
+                core.notice(`${tag}: ${process.env.MERGE_METHOD}-merged by auto-merge gate (checks: ${relevant.map(c => c.name).join(", ")})`);
+                await github.rest.issues.createComment({ owner, repo, issue_number: number,
+                  body: `🤖 auto-merged: all checks green on ${pr.head.sha.slice(0, 7)} (${relevant.map(c => c.name).join(", ")}).` });
+                if (process.env.DELETE_BRANCH === "true") {
+                  try { await github.rest.git.deleteRef({ owner, repo, ref: `heads/${pr.head.ref}` }); }
+                  catch (e) { core.info(`${tag}: branch delete skipped: ${e.message}`); }
+                }
+              } catch (e) {
+                core.warning(`${tag}: merge failed: ${e.message}`);
+              }
+            }

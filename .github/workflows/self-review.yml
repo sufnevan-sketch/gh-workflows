@@ -1,0 +1,26 @@
+# self-review.yml — this repo dogfoods its own reviewers on its own PRs, via
+# local reusable-workflow calls. No auto-merge gate here: every PR in this repo
+# touches .github/workflows/**, which the gate refuses on principle, so PRs
+# here are merged by hand after the reviews are green.
+#
+# Secrets needed on this repo: CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY.
+name: self-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened, labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write
+  actions: read
+
+jobs:
+  claude:
+    uses: ./.github/workflows/claude-review.yml
+    secrets: inherit
+  codex:
+    uses: ./.github/workflows/codex-review.yml
+    secrets: inherit

@@ -1,0 +1,23 @@
+# Stub. The real workflow lives in sufnevan-sketch/gh-workflows; project context
+# goes in .github/review-context.md, not here. Check name: "claude / claude-review".
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write
+  actions: read
+
+jobs:
+  claude:
+    uses: sufnevan-sketch/gh-workflows/.github/workflows/claude-review.yml@main
+    secrets: inherit
