@@ -2,7 +2,8 @@
 .SYNOPSIS  Install the PR review -> fix -> auto-merge stubs into a repo's .github/.
 .DESCRIPTION
   Copies stubs/ (thin callers of sufnevan-sketch/gh-workflows reusable workflows),
-  the PR template, and a starter .github/review-context.md. Fills the ci stub's
+  the PR template, and starters for .github/review-context.md (Claude) and AGENTS.md
+  (Codex cloud review, which reads nothing else). Fills the ci stub's
   setup/verify inputs. Never commits, never touches repo settings or secrets.
 .EXAMPLE   pwsh install.ps1 -Repo ../02-work/cam/projects/crm -Setup none -Verify "pwsh scripts/verify.ps1"
 .EXAMPLE   pwsh install.ps1 -Repo C:\code\website -Setup node-pnpm -Verify "pnpm verify" -Force
@@ -16,7 +17,7 @@ param(
   [string] $WorkingDirectory = '',   # subfolder the setup + verify steps run in (wrapper repos, e.g. web)
   [string] $Ref = 'main',      # gh-workflows ref the stubs pin: main (rolling) or a tag
   [switch] $WithAutoFix,       # also install auto-fix.yml (needs AUTOFIX_PAT secret)
-  [switch] $Force              # overwrite stubs / PR template that already exist (review-context.md is never overwritten)
+  [switch] $Force              # overwrite stubs / PR template that already exist (review-context.md and AGENTS.md are never overwritten)
 )
 $ErrorActionPreference = 'Stop'
 $src = $PSScriptRoot
@@ -54,6 +55,12 @@ $ctx = Join-Path $dst 'review-context.md'
 if (Test-Path -LiteralPath $ctx) { $skipped += 'review-context.md (kept)' }
 else { Write-Lf $ctx ([IO.File]::ReadAllText((Join-Path $src 'stubs/review-context.md'))); $copied += 'review-context.md' }
 
+# Codex cloud mode reads AGENTS.md and never review-context.md, so a repo without one
+# gets a CODEX-REVIEW verdict formed with no contracts at all. Repo root, not .github/.
+$agents = Join-Path $Repo 'AGENTS.md'
+if (Test-Path -LiteralPath $agents) { $skipped += 'AGENTS.md (kept)' }
+else { Write-Lf $agents ([IO.File]::ReadAllText((Join-Path $src 'stubs/AGENTS.md'))); $copied += 'AGENTS.md' }
+
 $name = try { (git -C $Repo remote get-url origin) -replace '^.*github\.com[:/]', '' -replace '\.git$', '' } catch { '<owner>/<repo>' }
 
 Write-Host "Copied  : $($copied -join ', ')"
@@ -61,7 +68,8 @@ if ($skipped) { Write-Host "Skipped : $($skipped -join ', ')" }
 Write-Host "ci stub : setup=$Setup  verify=`"$Verify`"  ref=@$Ref$(if ($WorkingDirectory) { "  working-directory=$WorkingDirectory" })"
 Write-Host ""
 Write-Host "Edit before committing:"
-Write-Host "  .github/review-context.md   -> one paragraph of project context + the contracts reviewers must hold the diff against"
+Write-Host "  .github/review-context.md   -> one paragraph of project context + the contracts Claude must hold the diff against"
+Write-Host "  AGENTS.md                   -> the same contracts in short form, under 2 KB; this is the only file Codex cloud review reads"
 Write-Host ""
 $names = if ($WithAutoFix) { 'CLAUDE_CODE_OAUTH_TOKEN,CODEX_TRIGGER_PAT,AUTOFIX_PAT' } else { 'CLAUDE_CODE_OAUTH_TOKEN,CODEX_TRIGGER_PAT' }
 Write-Host "Secrets (values in the gitignored env file, pushed by name, never printed):"
