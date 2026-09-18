@@ -90,9 +90,16 @@ jobs:
             exit 1
           fi
           # Idempotent per head SHA: skip if Codex already reviewed this commit.
+          # Two shapes: a review object when Codex has findings, and only an
+          # issue comment ("Reviewed commit: <sha10>") when it has none.
+          export SHA10="${HEAD_SHA:0:10}"
           have=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews?per_page=100" \
             --jq '[.[] | select(.user.login == env.CODEX_BOT and .commit_id == env.HEAD_SHA)] | length')
-          if [ "${have:-0}" -gt 0 ]; then echo "Codex already reviewed ${HEAD_SHA:0:7}; not re-asking"; exit 0; fi
+          have_clean=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments?per_page=100" \
+            --jq '[.[] | select(.user.login == env.CODEX_BOT and (.body | contains("Reviewed commit")) and (.body | contains(env.SHA10)))] | length')
+          if [ "${have:-0}" -gt 0 ] || [ "${have_clean:-0}" -gt 0 ]; then
+            echo "Codex already reviewed ${HEAD_SHA:0:7}; not re-asking"; exit 0
+          fi
           gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "${TRIGGER} (commit ${HEAD_SHA:0:7}; requested by the codex-review check)"
           echo "asked for a review of ${HEAD_SHA:0:7}"
 
@@ -104,10 +111,17 @@ jobs:
           WAIT_MIN: ${{ inputs.wait-minutes }}
         run: |
           deadline=$(( $(date +%s) + WAIT_MIN * 60 ))
+          export SHA10="${HEAD_SHA:0:10}"
+          # A clean Codex run leaves NO review object, only an issue comment
+          # naming the commit it reviewed, so waiting on reviews alone burns the
+          # full timeout on a PR Codex already finished (verified 2026-09-17,
+          # camedu-io/district-intel PR #2). Accept either shape.
           while :; do
             n=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews?per_page=100" \
               --jq '[.[] | select(.user.login == env.CODEX_BOT and .commit_id == env.HEAD_SHA)] | length')
-            if [ "${n:-0}" -gt 0 ]; then break; fi
+            m=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments?per_page=100" \
+              --jq '[.[] | select(.user.login == env.CODEX_BOT and (.body | contains("Reviewed commit")) and (.body | contains(env.SHA10)))] | length')
+            if [ "${n:-0}" -gt 0 ] || [ "${m:-0}" -gt 0 ]; then break; fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
               echo "::error::No Codex review on ${HEAD_SHA:0:7} after ${WAIT_MIN} min. Is the Codex GitHub connector installed for this owner, the repo listed in Codex settings, and CODEX_TRIGGER_PAT a user connected to Codex?"
               exit 1

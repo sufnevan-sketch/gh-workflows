@@ -19,4 +19,12 @@ concurrency:
 jobs:
   fix:
     uses: sufnevan-sketch/gh-workflows/.github/workflows/auto-fix.yml@main
-    secrets: inherit
+    secrets:
+      # Explicit, never `inherit`: GitHub passes inherited secrets only to a
+      # reusable workflow in the SAME org or enterprise. This repo is a user
+      # account, so an org caller inherits nothing and the call fails in 2s with
+      # "Secret <NAME> is required, but not provided while calling"
+      # (camedu-io/district-intel PR #1, 2026-09-17). Naming a secret that is not
+      # set is safe: it resolves empty.
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      AUTOFIX_PAT: ${{ secrets.AUTOFIX_PAT }}
