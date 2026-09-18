@@ -61,11 +61,15 @@ else { Write-Lf $ctx ([IO.File]::ReadAllText((Join-Path $src 'stubs/review-conte
 # own file, not a CI artifact: report the gap, never write it.
 $agentsMissing = -not (Test-Path -LiteralPath (Join-Path $Repo 'AGENTS.md'))
 
-# A failing native command does not throw, so the old try/catch never fired and
-# $name came back $null on a repo with no origin: every line below printed an empty
-# repo and the Codex line died on .Split() of $null.
-$origin = git -C $Repo remote get-url origin 2>$null
-$name = if ($LASTEXITCODE -eq 0 -and $origin) { $origin -replace '^.*github\.com[:/]', '' -replace '\.git$', '' } else { '<owner>/<repo>' }
+# Repo with no origin: the old `try { git ... } catch { '<owner>/<repo>' }` left
+# $name $null, so every instruction below printed an empty repo and the Codex line
+# died on .Split() of $null. How that call fails is version-dependent: with
+# $PSNativeCommandUseErrorActionPreference $false (pwsh 7.6.6 here) it exits 2 and
+# prints nothing; with it $true under $ErrorActionPreference 'Stop' it throws. Catch
+# both and test the output, so the fallback does not depend on which is in effect.
+$origin = $null
+try { $origin = git -C $Repo remote get-url origin 2>$null } catch { $origin = $null }
+$name = if ($origin) { $origin -replace '^.*github\.com[:/]', '' -replace '\.git$', '' } else { '<owner>/<repo>' }
 
 Write-Host "Copied  : $($copied -join ', ')"
 if ($skipped) { Write-Host "Skipped : $($skipped -join ', ')" }
