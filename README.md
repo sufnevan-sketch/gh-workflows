@@ -124,4 +124,4 @@ Branch (`fix/...` or `feat/...`), PR, let `self-check` and `self-review` run, me
 
 One line per install: `[YYYY-MM-DD] <repo> | <what happened on the smoke-test PRs> | <lesson, if any>`.
 
-- (none yet)
+- [2026-09-17] sufnevan-sketch/evan-workspace PR #2 (chore/ branch, install itself) | `ci / branch-name` + `ci / verify` green on first run (verify.ps1 output visible in CI), `codex / codex-review` correctly skipped for chore/, `claude / claude-review` failed in 2s: "Secret CLAUDE_CODE_OAUTH_TOKEN is required, but not provided" because no secret was set yet | Lesson: set both secrets BEFORE opening PR 1, or expect one `gh run rerun` after setting them. Reusable-workflow calls from a private repo to this public repo resolve with no extra settings.
