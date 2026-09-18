@@ -33,10 +33,11 @@ jobs:
         run: |
           fail=0
           for s in stubs/*.yml; do
-            for ref in $(grep -oE 'sufnevan-sketch/gh-workflows/\.github/workflows/[a-z-]+\.yml' "$s" | sort -u); do
+            while read -r ref; do
+              [ -n "$ref" ] || continue
               f=".github/workflows/${ref##*/}"
               if [ -f "$f" ]; then echo "ok  $s -> $f"; else echo "::error::$s references missing $f"; fail=1; fi
-            done
+            done < <(grep -oE 'sufnevan-sketch/gh-workflows/\.github/workflows/[a-z-]+\.yml' "$s" | sort -u)
           done
           exit $fail
 

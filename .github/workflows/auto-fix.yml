@@ -52,9 +52,9 @@ jobs:
           pr=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" \
             --jq '[.[] | select(.head.sha == env.HEAD_SHA and .head.repo.full_name == env.GITHUB_REPOSITORY and .draft == false)] | first // empty | "\(.number) \(.head.ref) \(.base.ref)"')
           if [ -z "$pr" ]; then echo "no open same-repo PR at ${HEAD_SHA:0:7}; nothing to fix"; exit 0; fi
-          set -- $pr
-          echo "number=$1" >> "$GITHUB_OUTPUT"; echo "head=$2" >> "$GITHUB_OUTPUT"; echo "base=$3" >> "$GITHUB_OUTPUT"
-          echo "PR #$1 ($2 -> $3)"
+          read -r number head base <<< "$pr"
+          { echo "number=$number"; echo "head=$head"; echo "base=$base"; } >> "$GITHUB_OUTPUT"
+          echo "PR #$number ($head -> $base)"
 
       - name: Checkout PR branch (PAT so the fix push re-triggers CI + review)
         if: steps.pr.outputs.number != ''
