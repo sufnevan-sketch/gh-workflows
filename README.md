@@ -42,6 +42,21 @@ gh secret list --repo <owner>/<repo>
 3. Codex (cloud mode, the default, no API key): in chatgpt.com → Codex → Settings → Code review, the GitHub connector must be installed for the repo's owner and the repo must appear in the list; keep personal **Auto review OFF** so Codex reviews only the PRs this workflow asks about (`@codex review`), never business PRs. The ask must come from a human account connected to Codex: Codex ignores mentions by `github-actions[bot]` (verified 2026-09-17), so the secret `CODEX_TRIGGER_PAT` is required: a GitHub PAT of the connected user with permission to comment on the repo (fine-grained: Pull requests read/write + Issues read/write on the chosen repos, or classic `repo`). One PAT can cover every installed repo; push it with `set-secrets.ps1 -Names CLAUDE_CODE_OAUTH_TOKEN,CODEX_TRIGGER_PAT`. Codex reads the repo's `AGENTS.md`, so repo contracts for Codex go there (2 KB cap). `OPENAI_API_KEY` is needed only with `mode: action`.
 4. Commit `.github/` on a `docs/` branch and open the PR. The gate never auto-merges a PR that touches `.github/workflows/**`, so merge this one by hand; it is the smoke test for `ci / verify` and `claude / claude-review`. A second PR on a `fix/` branch exercises Codex and the gate.
 
+### Why the stubs name every secret instead of `secrets: inherit`
+
+GitHub passes inherited secrets only to a reusable workflow **in the same organization or enterprise** as the caller. This repo lives under a user account, so a caller in any org inherits nothing and the job dies in 2 seconds with `Secret CLAUDE_CODE_OAUTH_TOKEN is required, but not provided while calling` — the repo's secrets are set and present; they are simply never handed over. Verified 2026-09-17 on `camedu-io/district-intel` PR #1, where `gh secret list` showed both secrets and a rerun failed identically.
+
+So each stub passes what its callee declares, by name:
+
+| Stub | Passes |
+|---|---|
+| `claude-review.yml`, `claude.yml` | `CLAUDE_CODE_OAUTH_TOKEN` |
+| `codex-review.yml` | `CODEX_TRIGGER_PAT` (add `OPENAI_API_KEY` only with `mode: action`) |
+| `auto-fix.yml` | `CLAUDE_CODE_OAUTH_TOKEN`, `AUTOFIX_PAT` |
+| `auto-merge.yml` | nothing — the callee declares no secrets, so it has no `secrets:` block at all |
+
+Naming a secret the repo has not set is safe: it resolves empty, and a callee that declares it `required: false` runs anyway. Naming one the callee does not declare is a hard config error, which is why `auto-merge.yml` must stay bare. `self-review.yml` keeps `inherit` because it calls workflows in this same repo.
+
 Per-repo variance is exactly: the ci stub's `setup` / `verify` (and `working-directory` for wrapper repos), and `review-context.md`. Everything else is here.
 
 ## Check names
@@ -123,6 +138,7 @@ Branch (`fix/...` or `feat/...`), PR, let `self-check` and `self-review` run, me
 
 ## Verdict log
 
+- [2026-09-17] camedu-io/district-intel PR #1 (docs/, install itself) | `ci / branch-name` + `ci / verify` green on first run (196 pytest in 34s, via `pwsh scripts/verify.ps1` wrapping the dummy `SUPABASE_*` env the stub cannot inject); `codex / codex-review` correctly skipped for `docs/`; `claude / claude-review` failed in 2s on a set-and-present secret, twice, including after `gh run rerun` | Lesson: `secrets: inherit` is same-org-or-enterprise only. Every caller outside `sufnevan-sketch` inherits nothing. Stubs now pass each secret by name; `auto-merge.yml` stays bare because its callee declares none. First install under a different owner, which is what surfaced it.
 - [2026-09-17] sufnevan-sketch/evan-workspace PR #3, round 2 with CODEX_TRIGGER_PAT set | Claude PASS 2m08s; Codex cloud review triggered by the PAT-authored `@codex review`, reviewed in 2m43s, one P2 (non-blocking), `CODEX-REVIEW: PASS`; `gate / auto-merge` squash-merged and deleted the branch with no human action. First fully automatic merge through the loop. | Lesson: the whole install is: stubs + review-context + verify command + two secrets (Claude token, Codex-connected user's PAT) + repo listed in Codex settings.
 - [2026-09-17] sufnevan-sketch/evan-workspace PR #3 (fix/ branch) | `ci / *` green; `claude / claude-review` PASS in 3m56s with one real inline MEDIUM (BOM bytes uncounted), fixed in the next push; `gate / auto-merge` ran and correctly waited on Codex; `codex / codex-review` (cloud) got the bot reply "To use Codex here, create a Codex account and connect to github" | Lessons: (1) Codex ignores `@codex review` from `github-actions[bot]`; `CODEX_TRIGGER_PAT` is required, now fail-fast. (2) claude-code-action skips any PR that changes a workflow file; install PRs are hand-merge, now reported as a warning instead of "no verdict".
 
