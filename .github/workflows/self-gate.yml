@@ -1,0 +1,40 @@
+# self-gate.yml — this repo's own merge gate, a local call of auto-merge.yml.
+# Check name: "gate / auto-merge".
+#
+# It merges only PRs that touch NOTHING under .github/workflows/** (README,
+# install.ps1, set-secrets.ps1, stubs/, the PR template). The reusable gate
+# refuses workflow-touching PRs on principle and that rule is deliberately NOT
+# lifted here: on a pull_request event self-review.yml runs the PR's own copy
+# of the reviewers, so a PR that breaks a reviewer would be merged on the word
+# of the check it broke. Those PRs are still merged by hand after the reviews
+# are green (`gh pr merge <n> --squash --delete-branch`).
+#
+# workflow_run always runs the default branch's copy of this file and of
+# auto-merge.yml, so a PR cannot change the gate that judges it.
+# Kill switch: delete this file, or put BLOCKED at the start of a PR title.
+name: self-gate
+
+on:
+  workflow_run:
+    workflows: ["self-check", "self-review"]
+    types: [completed]
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch: # drain: re-evaluate every open PR
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  actions: read
+
+concurrency:
+  group: self-gate-${{ github.event.workflow_run.head_sha || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    uses: ./.github/workflows/auto-merge.yml
+    with:
+      # This repo's CI check is self-check's `lint`, not `ci / verify`.
+      required-checks: "lint,claude / claude-review"

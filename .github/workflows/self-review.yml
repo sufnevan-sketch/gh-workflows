@@ -1,7 +1,7 @@
 # self-review.yml — this repo dogfoods its own reviewers on its own PRs, via
-# local reusable-workflow calls. No auto-merge gate here: every PR in this repo
-# touches .github/workflows/**, which the gate refuses on principle, so PRs
-# here are merged by hand after the reviews are green.
+# local reusable-workflow calls. The gate is self-gate.yml: it merges PRs that
+# touch nothing under .github/workflows/**; a PR that does is refused by the
+# gate on principle and is merged by hand after the reviews are green.
 #
 # Secrets needed on this repo: CLAUDE_CODE_OAUTH_TOKEN and CODEX_TRIGGER_PAT
 # (cloud mode needs no API key; OPENAI_API_KEY only if codex switches to
