@@ -129,8 +129,13 @@ jobs:
             sleep 30
           done
           # Findings = inline review comments by the bot on this commit carrying a P0/P1 badge.
+          # original_commit_id, not commit_id: when a later push leaves the commented
+          # line in the diff, GitHub re-anchors the old comment and rewrites its
+          # commit_id to the new head, so findings already fixed kept failing every
+          # later round (seen 2026-09-21 on a three-round PR).
+          # original_commit_id stays the commit Codex actually reviewed.
           findings=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/comments?per_page=100" \
-            --jq '.[] | select(.user.login == env.CODEX_BOT and .commit_id == env.HEAD_SHA and (.body | test("badge/P[01]-"))) | "\(.path):\(.line // .original_line) - \((.body | capture("badge/(?<p>P[01])-").p)): \(.body | split("\n")[0] | gsub("![[]P[01] Badge[]][(][^)]*[)]|<sub>|</sub>|[*]"; "") | .[0:160])"')
+            --jq '.[] | select(.user.login == env.CODEX_BOT and .original_commit_id == env.HEAD_SHA and (.body | test("badge/P[01]-"))) | "\(.path):\(.line // .original_line) - \((.body | capture("badge/(?<p>P[01])-").p)): \(.body | split("\n")[0] | gsub("![[]P[01] Badge[]][(][^)]*[)]|<sub>|</sub>|[*]"; "") | .[0:160])"')
           count=$(printf '%s' "$findings" | grep -c . || true)
           verdict=$([ "$count" -eq 0 ] && echo "PASS" || echo "CHANGES REQUESTED")
           {
