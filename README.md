@@ -16,6 +16,7 @@ Each repo keeps only thin stubs under `.github/workflows/` that call the workflo
 | `.github/workflows/auto-fix.yml` | reusable, opt-in: Claude fixes CHANGES REQUESTED in CI, max 3 rounds, needs `AUTOFIX_PAT` |
 | `.github/workflows/self-check.yml` | this repo's CI: actionlint on workflows and stubs, stub references resolve, script bodies parse |
 | `.github/workflows/self-review.yml` | this repo dogfoods `claude-review` + `codex-review` on its own PRs |
+| `.github/workflows/self-gate.yml` | this repo's own gate: merges green PRs that touch nothing under `.github/workflows/**` |
 | `stubs/*.yml` | what a calling repo gets: triggers + `uses:` + inputs, nothing else |
 | `stubs/review-context.md` | starter for the per-repo file **Claude** reads |
 | `stubs/pull_request_template.md` | PR body written for a reader who does not read code |
@@ -141,7 +142,7 @@ Fix every CRITICAL/HIGH, run the verify command, commit, push. `synchronize` re-
 
 ## Changing a workflow here
 
-Branch (`fix/...` or `feat/...`), PR, let `self-check` and `self-review` run, merge by hand (every PR here touches workflows). Stubs pin `@main`, so the change is live for every repo on its next PR. If a change must roll out gradually, tag a release (`v1`) and install stubs with `-Ref v1`.
+Branch (`fix/...` or `feat/...`), PR, let `self-check` and `self-review` run, then merge by hand: `gh pr merge <n> --squash --delete-branch`. `self-gate.yml` merges green PRs on its own only when they touch nothing under `.github/workflows/**` (README, installer, stubs, PR template); a PR that edits a workflow runs its own copy of the reviewers, so the gate will not take their word for it. Stubs pin `@main`, so the change is live for every repo on its next PR. If a change must roll out gradually, tag a release (`v1`) and install stubs with `-Ref v1`.
 
 ## Verdict log
 
