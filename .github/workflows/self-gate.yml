@@ -9,8 +9,11 @@
 # of the check it broke. Those PRs are still merged by hand after the reviews
 # are green (`gh pr merge <n> --squash --delete-branch`).
 #
-# workflow_run always runs the default branch's copy of this file and of
-# auto-merge.yml, so a PR cannot change the gate that judges it.
+# Which copy runs: workflow_run uses the default branch's copy of this file and
+# of auto-merge.yml; pull_request_review uses the PR's own copy. So the refusal
+# above guards against a PR that breaks a reviewer by accident, not against a
+# hostile same-repo branch (which could add any workflow it likes anyway; only
+# trusted sessions push here, and forks get no write token).
 # Kill switch: delete this file, or put BLOCKED at the start of a PR title.
 name: self-gate
 
