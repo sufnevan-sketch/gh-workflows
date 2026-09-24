@@ -6,7 +6,7 @@
   has an AGENTS.md, which is the only file Codex cloud review reads, but never writes
   one: that file is the repo's own, not a CI artifact. Fills the ci stub's
   setup/verify inputs. Never commits, never touches repo settings or secrets.
-.EXAMPLE   pwsh install.ps1 -Repo ../02-work/cam/projects/crm -Setup none -Verify "pwsh scripts/verify.ps1"
+.EXAMPLE   pwsh install.ps1 -Repo ../02-work/cam/projects/crm -Setup none -Verify "pwsh ./verify.ps1"
 .EXAMPLE   pwsh install.ps1 -Repo C:\code\website -Setup node-pnpm -Verify "pnpm verify" -Force
 .EXAMPLE   pwsh install.ps1 -Repo . -Setup python -Verify "pytest -q" -WithAutoFix -Ref v1
 #>
@@ -14,7 +14,7 @@
 param(
   [Parameter(Mandatory)] [string] $Repo,
   [ValidateSet('none', 'node-pnpm', 'node-npm', 'python')] [string] $Setup = 'none',
-  [string] $Verify = 'pwsh scripts/verify.ps1',
+  [string] $Verify = 'pwsh ./verify.ps1',
   [string] $WorkingDirectory = '',   # subfolder the setup + verify steps run in (wrapper repos, e.g. web)
   [string] $Ref = 'main',      # gh-workflows ref the stubs pin: main (rolling) or a tag
   [switch] $WithAutoFix,       # also install auto-fix.yml (needs AUTOFIX_PAT secret)

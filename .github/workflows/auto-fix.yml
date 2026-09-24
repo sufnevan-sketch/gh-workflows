@@ -99,7 +99,7 @@ jobs:
                gh api repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/reviews
                gh api repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}/comments
             2. Implement a fix for EVERY CRITICAL/HIGH finding. Keep changes minimal and scoped strictly to the findings; do not refactor unrelated code.
-            3. Run the repo's verify command if one exists (scripts/verify.ps1, package.json scripts, pytest) and make it pass.
+            3. Run the repo's verify command (the `verify:` input in .github/workflows/ci.yml, usually `pwsh ./verify.ps1`; otherwise package.json scripts or pytest) and make it pass.
             4. Commit on the current branch with a message that INCLUDES the marker `[auto-fix]`, then `git push origin HEAD:${{ steps.pr.outputs.head }}` (do NOT open a new PR).
             If a finding is a false positive, reply to it explaining why instead of changing code, but still commit any real fixes.
           claude_args: '--max-turns 100 --allowed-tools "Bash(gh *),Bash(git *),Bash(pwsh *),Bash(npm *),Bash(pnpm *),Bash(pytest *),Edit,Write,Read,Grep,Glob"'
