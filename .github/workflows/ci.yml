@@ -22,7 +22,7 @@ on:
       verify:
         description: "The one verify command (lint + typecheck + tests + build)"
         type: string
-        default: pwsh scripts/verify.ps1
+        default: pwsh ./verify.ps1
       working-directory:
         description: "Directory the setup and verify steps run in (e.g. web for a wrapper repo)"
         type: string
