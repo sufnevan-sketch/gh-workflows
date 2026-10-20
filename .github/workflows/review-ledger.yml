@@ -119,8 +119,12 @@ jobs:
               }
             };
 
+            const failed = [];
+            try {
             for (const number of PRS) {
               const tag = `#${number}`;
+              // One PR's API error must not cost the rest of the batch their ledger.
+              try {
               const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: number });
               if (!pr.merged) { core.info(`${tag}: not merged, skip`); continue; }
               if (pr.head.repo && pr.head.repo.full_name !== `${owner}/${repo}`) { core.info(`${tag}: fork PR, skip`); continue; }
@@ -167,7 +171,7 @@ jobs:
                   // GraphQL drops the `[bot]` suffix REST shows; match both forms.
                   const login = c.author ? c.author.login : "";
                   if (!BOTS.has(login) && !BOTS.has(`${login}[bot]`)) continue;
-                  const sev = sevOf(c.body);
+                  const sev = sevOf(firstLine(c.body).replace(/^(\S+:\d+\s+)+-\s*/, "")) || sevOf(c.body.replace(/^(\S+:\d+\s+)+/, ""));
                   if (BLOCKING.has(sev)) continue;
                   // Claude's inline body opens with `path:line path:line - SEV:`; keep the problem.
                   const title = cut(firstLine(c.body).replace(/^(\S+:\d+\s+)+-\s*/, "").replace(/^(MEDIUM|LOW):\s*/, ""), 220);
@@ -210,5 +214,12 @@ jobs:
                 body: issue.body + `\n\nTo close: fix them in a PR whose description says \`Closes #${issue.number}\` (that PR files no ledger of its own), or close this by hand for findings not worth fixing. Add the label \`${FIX_LABEL}\` to have CI open that PR (needs the ledger-fix stub and \`AUTOFIX_PAT\`).` });
               filed.push(issue.number);
               core.notice(`${tag}: filed review ledger #${issue.number} (${inline.length} inline, ${fromSummary.length} from summaries)`);
+              } catch (e) {
+                failed.push(number);
+                core.warning(`${tag}: ledger failed: ${e.message}. Backfill: gh workflow run auto-merge -f ledger-pr=${number}`);
+              }
             }
-            core.setOutput("issues", filed.join(","));
+            } finally {
+              core.setOutput("issues", filed.join(","));
+            }
+            if (failed.length) core.setFailed(`ledger failed for #${failed.join(", #")}`);
