@@ -87,6 +87,9 @@ jobs:
             };
             const clean = t => t.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/<\/?sub>/g, "").replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
             const firstLine = t => clean((t || "").split("\n").find(l => clean(l)) || "");
+            // Drop leading `path:line` tokens (Claude inline bodies, Codex action-mode
+            // summaries) so a path like `scripts/P1-x.ts` cannot set the severity.
+            const unlocate = t => t.replace(/^(\S+:\d+\s+)+-\s*/, "");
             const cut = (t, n) => t.length > n ? t.slice(0, n - 1) + "…" : t;
 
             // List items under a `Non-blocking:` line, or carrying a non-blocking
@@ -104,18 +107,21 @@ jobs:
                 }
                 const text = clean(item[1]);
                 if (/\(inline\b/i.test(text)) continue;
-                if (BLOCKING.has(sevOf(text))) continue;
-                if (inSection || /\b(MEDIUM|LOW|P2|P3)\b/.test(text)) out.push(text);
+                const sev = sevOf(unlocate(text));
+                if (BLOCKING.has(sev)) continue;
+                if (inSection || ["MEDIUM", "LOW", "P2", "P3"].includes(sev)) out.push(text);
               }
               return out;
             };
 
-            const ensureLabel = async () => {
-              try { await github.rest.issues.getLabel({ owner, repo, name: LABEL }); }
+            // Both labels must exist before anyone can apply them. 422 = another ledger
+            // job created it a moment ago; that is success.
+            const ensureLabel = async (name, color, description) => {
+              try { await github.rest.issues.getLabel({ owner, repo, name }); }
               catch (e) {
                 if (e.status !== 404) throw e;
-                await github.rest.issues.createLabel({ owner, repo, name: LABEL, color: "fbca04",
-                  description: "Non-blocking review findings from a merged PR" });
+                try { await github.rest.issues.createLabel({ owner, repo, name, color, description }); }
+                catch (e2) { if (e2.status !== 422) throw e2; }
               }
             };
 
@@ -171,10 +177,10 @@ jobs:
                   // GraphQL drops the `[bot]` suffix REST shows; match both forms.
                   const login = c.author ? c.author.login : "";
                   if (!BOTS.has(login) && !BOTS.has(`${login}[bot]`)) continue;
-                  const sev = sevOf(firstLine(c.body).replace(/^(\S+:\d+\s+)+-\s*/, "")) || sevOf(c.body.replace(/^(\S+:\d+\s+)+/, ""));
+                  const sev = sevOf(unlocate(firstLine(c.body))) || sevOf(c.body.replace(/^(\S+:\d+\s+)+/, ""));
                   if (BLOCKING.has(sev)) continue;
                   // Claude's inline body opens with `path:line path:line - SEV:`; keep the problem.
-                  const title = cut(firstLine(c.body).replace(/^(\S+:\d+\s+)+-\s*/, "").replace(/^(MEDIUM|LOW):\s*/, ""), 220);
+                  const title = cut(unlocate(firstLine(c.body)).replace(/^(MEDIUM|LOW):\s*/, ""), 220);
                   inline.push(`- [ ] ${sev || "note"} \`${t.path}:${t.line || t.originalLine || "?"}\` ${title} ([thread](${c.url}), ${login})`);
                 }
                 cursor = threads.pageInfo.hasNextPage ? threads.pageInfo.endCursor : null;
@@ -197,7 +203,8 @@ jobs:
               if (!inline.length && !fromSummary.length && !overridden.length) { core.info(`${tag}: no non-blocking findings, nothing to file`); continue; }
 
               // --- File ---
-              await ensureLabel();
+              await ensureLabel(LABEL, "fbca04", "Non-blocking review findings from a merged PR");
+              await ensureLabel(FIX_LABEL, "0e8a16", "On a review-ledger issue: CI opens the fix PR (ledger-fix)");
               const sections = [
                 marker,
                 `Non-blocking review findings left on #${number} (${pr.title}), merged at ${pr.merge_commit_sha ? pr.merge_commit_sha.slice(0, 7) : pr.head.sha.slice(0, 7)}. None of them blocked the merge; this issue is where they are tracked instead of a follow-up PR nobody remembers.`,
