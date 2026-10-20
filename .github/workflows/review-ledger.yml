@@ -155,8 +155,10 @@ jobs:
 
               // --- Idempotency: one ledger and one outcomes comment per PR ---
               const marker = `<!-- review-ledger:pr=${number} -->`;
-              const existing = (await github.paginate(github.rest.issues.listForRepo, { owner, repo, labels: LABEL, state: "all", per_page: 100 }))
-                .find(i => (i.body || "").includes(marker));
+              // By marker among the bot's issues, not by label: removing the label must not
+              // make the next run file a second ledger.
+              const existing = (await github.paginate(github.rest.issues.listForRepo, { owner, repo, creator: "github-actions[bot]", state: "all", per_page: 100 }))
+                .find(i => !i.pull_request && (i.body || "").includes(marker));
               const prComments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 });
               const hasOutcomes = prComments.some(c => (c.body || "").includes("<!-- review-outcomes:v1"));
               if (existing && hasOutcomes) { core.info(`${tag}: ledger #${existing.number} and outcomes already recorded, skip`); continue; }
@@ -188,7 +190,9 @@ jobs:
                   // GraphQL drops the `[bot]` suffix REST shows; match both forms.
                   const login = c.author ? c.author.login : "";
                   if (!BOTS.has(login) && !BOTS.has(`${login}[bot]`)) continue;
-                  const sev = sevOf(unlocate(firstLine(c.body))) || sevOf(c.body.replace(/^(\S+:\d+\s+)+/, ""));
+                  // Same reading as the gate (auto-merge.yml): badge first, then the first severity
+                  // word after any leading path:line. The two must agree on what is non-blocking.
+                  const sev = sevOf(c.body.replace(/^(\S+:\d+\s+)+(-\s*)?/, ""));
                   if (BLOCKING.has(sev)) continue;
                   // Outdated = the lines changed under it (a proxy for fixed); resolved = dropped.
                   outcomes.push({ sev: sev || "note", by: byOf(login), outcome: t.isOutdated ? "addressed" : t.isResolved ? "dropped" : "deferred" });

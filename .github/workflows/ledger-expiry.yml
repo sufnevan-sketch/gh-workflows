@@ -6,7 +6,9 @@
 # near 0% from batch reports vs over 70% at review time; Google's Fixit: 16%).
 # An old ledger is clutter, not a plan. Sonar's "Clean as You Code" moves an
 # unaddressed new-code issue to the overall backlog after 30 days; this does the
-# same: `stale` at 14 days from creation, closed as not planned at 30. Activity
+# same: `stale` at 14 days from creation, closed as not planned about 16 days
+# later (day 30-31: the job runs daily, and v11 counts the close days from the
+# stale label). Unverified until the first issue crosses day 14. Activity
 # does not reset the clock (ignore-issue-updates), so a comment cannot keep an
 # item alive forever; the `keep` label exempts one on purpose.
 # Unticked items in an expired ledger count as "expired" in ledger-stats.ps1.

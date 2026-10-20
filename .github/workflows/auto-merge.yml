@@ -121,7 +121,8 @@ jobs:
             const CODEX_LABELS = list(process.env.CODEX_LABELS);
             const WINDOW_MS = Math.min(Math.max(Number(process.env.FIX_WINDOW_MINUTES) || 0, 0), 20) * 60000;
             const WINDOW_SKIP = list(process.env.FIX_WINDOW_SKIP_PREFIXES);
-            const POLL_MS = Math.max(Number(process.env.FIX_WINDOW_POLL_SECONDS) || 0, 0) * 1000;
+            // Floor at 5 s: a 0 or garbage input must not turn the wait into an API hammer.
+            const POLL_MS = Math.max(Number(process.env.FIX_WINDOW_POLL_SECONDS) || 30, 5) * 1000;
             const BOTS = new Set(list(process.env.REVIEW_BOTS));
             const WINDOW_MARK = /<!-- fix-window:until=([0-9T:.\-Z]+) -->/;
             const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -244,10 +245,13 @@ jobs:
             };
             // The window's deadline lives in a gate comment: every gate run reads the same
             // one, and a fix push cannot open a second window.
+            // Only the gate's own comments count, and a marker can never push the deadline
+            // past one window from now: a stray or forged far-future marker cannot hang the PR.
             const windowUntil = async number => {
               const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 });
-              const marks = comments.map(c => (c.body || "").match(WINDOW_MARK)).filter(Boolean).map(m => new Date(m[1]).getTime()).filter(t => !Number.isNaN(t));
-              return marks.length ? Math.min(...marks) : null;
+              const marks = comments.filter(c => c.user && c.user.login === "github-actions[bot]")
+                .map(c => (c.body || "").match(WINDOW_MARK)).filter(Boolean).map(m => new Date(m[1]).getTime()).filter(t => !Number.isNaN(t));
+              return marks.length ? Math.min(Math.min(...marks), Date.now() + WINDOW_MS) : null;
             };
 
             try {
@@ -271,7 +275,12 @@ jobs:
                   until = await windowUntil(number); // a racing gate run may have posted first; the earliest wins
                 }
                 if (open.length && until !== null && Date.now() < until) {
-                  if (prNumbers.length > 1) { core.info(`${tag}: fix window open until ${new Date(until).toISOString()} (${open.length} thread(s)), skip in a multi-PR drain`); continue; }
+                  if (prNumbers.length > 1) {
+                    // A drain never sleeps. The PR's own review/CI completions normally start a
+                    // single-PR run that waits; if none is coming, re-drain after the deadline.
+                    core.notice(`${tag}: held by the fix window until ${new Date(until).toISOString()} (${open.length} thread(s)); not merged by this drain. If no other gate run is waiting on it, run \`gh workflow run auto-merge\` after that time.`);
+                    continue;
+                  }
                   const sha = ev.pr.head.sha;
                   core.info(`${tag}: fix window, ${open.length} thread(s) open, waiting until ${new Date(until).toISOString()}`);
                   let gone = "";

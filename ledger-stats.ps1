@@ -31,8 +31,11 @@ function Invoke-Gh {
 $since = (Get-Date).ToUniversalTime().AddDays(-$Days).ToString('yyyy-MM-dd')
 $tiers = @('P2', 'P3', 'MEDIUM', 'LOW', 'note')
 
+# Tier from the item's leading token (`P2 \`path\``, `LOW: ...`, `path:line - MEDIUM: ...`),
+# never from a severity-looking word later in the text or inside a path.
 function Get-Sev([string] $text) {
-  $m = [regex]::Match($text, '\b(CRITICAL|HIGH|MEDIUM|LOW|P[0-3])\b')
+  $t = $text -replace '^\S+:\d+\s+-\s*', ''
+  $m = [regex]::Match($t, '^(CRITICAL|HIGH|MEDIUM|LOW|P[0-3]|note)\b')
   if ($m.Success) { return $m.Groups[1].Value } else { return 'note' }
 }
 function New-Row { [ordered]@{ addressed = 0; dropped = 0; deferred = 0; ledgerFixed = 0; ledgerOpen = 0; ledgerClosedUnfixed = 0 } }
@@ -59,7 +62,9 @@ foreach ($r in $Repos) {
     }
   }
   # --- Auto-fix PRs (ledger-fix opens fix/ledger-<n>) ---
-  $fixPrs = Invoke-Gh pr list --repo $r --state all --search "head:fix/ledger- created:>=$since" --limit 200 --json state | ConvertFrom-Json
+  # Filtered here: the search `head:` qualifier matches a whole branch name, not a prefix.
+  $fixPrs = Invoke-Gh pr list --repo $r --state all --limit 500 --json "state,headRefName,createdAt" | ConvertFrom-Json |
+    Where-Object { $_.headRefName -like 'fix/ledger-*' -and ([datetime]$_.createdAt).ToUniversalTime() -ge [datetime]$since }
   foreach ($f in $fixPrs) {
     if ($f.state -eq 'MERGED') { $autoFix.merged++ } elseif ($f.state -eq 'CLOSED') { $autoFix.closedUnmerged++ } else { $autoFix.open++ }
   }

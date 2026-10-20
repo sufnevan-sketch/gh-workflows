@@ -141,7 +141,7 @@ Blocking severities are dropped (a later PASS cleared them); a PR merged by hand
 
 Closing it: a PR whose body says `Closes #<issue>` (GitHub closes the issue on merge), or close it by hand; tick the boxes of items you fixed, so the stats count them. Such a PR **never files a ledger of its own**, which bounds the loop at one hop. Or add the label `auto-fix` (needs the `ledger-fix` stub and `AUTOFIX_PAT`): Claude checks each finding against the default branch, ticks FIX / FIXED ALREADY items, opens `fix/ledger-<n>` with `Closes #<n>`, and that PR runs the normal reviews and gate; if nothing needs a change it comments the decisions and closes the issue instead.
 
-**3. Expiry (job `expiry`, daily).** `stale` at 14 days from creation, closed as not planned at 30; comments do not reset the clock. Label `keep` exempts one. 30 days follows Sonar's "Clean as You Code", which moves an unaddressed new-code issue to the overall backlog after 30 days.
+**3. Expiry (job `expiry`, daily).** `stale` at 14 days from creation, closed as not planned about 16 days later (around day 30-31, since the job runs once a day); comments do not reset the clock. Label `keep` exempts one. 30 days follows Sonar's "Clean as You Code", which moves an unaddressed new-code issue to the overall backlog after 30 days.
 
 **4. Outcomes and stats.** Every merged PR with non-blocking findings gets one `<!-- review-outcomes:v1 {...} -->` comment ("📋 Non-blocking review findings: N addressed by a push, N dropped, N deferred to #M"), one entry per finding with severity and reviewer. `pwsh ledger-stats.ps1 -Repos <owner/repo>,...` turns those and the ledger checkboxes into fix rates per tier. Act on (judgment, not published norms):
 
