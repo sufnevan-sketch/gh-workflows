@@ -22,6 +22,8 @@
 #      name in required-checks is present and succeeded, and codex-check
 #      succeeded when the branch/label rule says Codex applies.
 # The merge uses the caller's GITHUB_TOKEN (terminal action, nothing to cascade).
+# Output `merged-prs` lists what this run merged; the stub's `ledger` job hands it
+# to review-ledger.yml, because a GITHUB_TOKEN merge fires no `pull_request: closed`.
 # Kill switch: delete the stub, or put BLOCKED at the start of a PR title.
 name: auto-merge (reusable)
 
@@ -52,6 +54,10 @@ on:
       delete-branch:
         type: boolean
         default: true
+    outputs:
+      merged-prs:
+        description: "Comma list of PR numbers this run merged (feeds review-ledger.yml)"
+        value: ${{ jobs.auto-merge.outputs.merged }}
 
 permissions:
   contents: write
@@ -64,6 +70,8 @@ jobs:
     name: auto-merge
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      merged: ${{ steps.gate.outputs.merged }}
     env:
       REQUIRED_CHECKS: ${{ inputs.required-checks }}
       CODEX_CHECK: ${{ inputs.codex-check }}
@@ -73,10 +81,12 @@ jobs:
       MERGE_METHOD: ${{ inputs.merge-method }}
       DELETE_BRANCH: ${{ inputs.delete-branch }}
     steps:
-      - uses: actions/github-script@v7
+      - id: gate
+        uses: actions/github-script@v7
         with:
           script: |
             const { owner, repo } = context.repo;
+            const merged = [];
             const list = v => (v || "").split(",").map(s => s.trim()).filter(Boolean);
             const REQUIRED = list(process.env.REQUIRED_CHECKS);
             const SKIP_PREFIXES = list(process.env.SKIP_BRANCH_PREFIXES);
@@ -100,6 +110,7 @@ jobs:
               prNumbers = (await openPRs()).map(p => p.number);
             }
             if (prNumbers.length === 0) { core.info("no candidate PRs"); return; }
+            try {
 
             for (const number of prNumbers) {
               const tag = `#${number}`;
@@ -136,8 +147,12 @@ jobs:
               // merge forever even after the real run goes green (verified 2026-09-17,
               // camedu-io/crm PR #5, where opened+labeled fired one second apart).
               // GitHub's own checks UI dedupes the same way.
+              // Skip this workflow's own jobs: a gate run triggered by pull_request_review
+              // posts `gate / auto-merge` and its sibling `ledger / review-ledger` on the
+              // PR head (seen on camedu-io/crm #19), and the ledger job sits pending on
+              // `needs: gate` while an overlapping gate run evaluates.
               const newest = new Map();
-              for (const c of checkRuns.filter(c => !c.name.endsWith("auto-merge"))) {
+              for (const c of checkRuns.filter(c => !/(auto-merge|review-ledger)$/.test(c.name))) {
                 const prev = newest.get(c.name);
                 const t = c2 => new Date(c2.started_at || 0).getTime();
                 // started_at decides; id only breaks an exact tie. An `||` on id alone could
@@ -164,6 +179,7 @@ jobs:
                   commit_title: `${pr.title} (#${number})`,
                   sha: pr.head.sha, // refuse if the head moved since we evaluated it
                 });
+                merged.push(number);
                 core.notice(`${tag}: ${process.env.MERGE_METHOD}-merged by auto-merge gate (checks: ${relevant.map(c => c.name).join(", ")})`);
                 await github.rest.issues.createComment({ owner, repo, issue_number: number,
                   body: `🤖 auto-merged: all checks green on ${pr.head.sha.slice(0, 7)} (${relevant.map(c => c.name).join(", ")}).` });
@@ -174,4 +190,10 @@ jobs:
               } catch (e) {
                 core.warning(`${tag}: merge failed: ${e.message}`);
               }
+            }
+            } finally {
+              // The caller's review-ledger job files non-blocking findings for these.
+              // It cannot hang off `pull_request: closed`: a merge made with
+              // GITHUB_TOKEN fires no workflow events.
+              core.setOutput("merged", merged.join(","));
             }

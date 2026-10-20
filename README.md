@@ -11,7 +11,9 @@ Each repo keeps only thin stubs under `.github/workflows/` that call the workflo
 | `.github/workflows/ci.yml` | reusable: `branch-name` (enforces `<type>/<short-description>`) + `verify` (optional toolchain, then the repo's one verify command) |
 | `.github/workflows/claude-review.yml` | reusable: Claude reviews, posts inline findings, submits `AUTO-REVIEW: PASS` or `CHANGES REQUESTED`; a gate step turns that into the job's exit code |
 | `.github/workflows/codex-review.yml` | reusable: Codex second review on `feat/ fix/ refactor/ perf/ build/` branches or PRs labeled `codex-review` / `risk:high`. Default `mode: cloud` = Codex cloud code review from the ChatGPT plan (the job comments `@codex review`, waits for the bot's review, red on any P0/P1 finding). `mode: action` = `openai/codex-action@v1` with an API key. Either way: `CODEX-REVIEW: PASS` or `CHANGES REQUESTED`, red/green |
-| `.github/workflows/auto-merge.yml` | reusable: squash-merges when every check on the head SHA is green, required checks present, Codex present where the branch rule applies |
+| `.github/workflows/auto-merge.yml` | reusable: squash-merges when every check on the head SHA is green, required checks present, Codex present where the branch rule applies; outputs the PRs it merged |
+| `.github/workflows/review-ledger.yml` | reusable: after a merge, files the PR's non-blocking findings (Codex P2/P3, Claude MEDIUM/LOW) as one `review-ledger` issue. Called by the auto-merge stub's `ledger` job |
+| `.github/workflows/ledger-fix.yml` | reusable, opt-in: label a `review-ledger` issue `auto-fix` and Claude opens a `fix/ledger-<n>` PR with `Closes #<n>`; needs `AUTOFIX_PAT` |
 | `.github/workflows/claude.yml` | reusable: `@claude` mention handler |
 | `.github/workflows/auto-fix.yml` | reusable, opt-in: Claude fixes CHANGES REQUESTED in CI, max 3 rounds, needs `AUTOFIX_PAT` |
 | `.github/workflows/self-check.yml` | this repo's CI: actionlint on workflows and stubs, stub references resolve, script bodies parse |
@@ -77,6 +79,7 @@ A reusable job shows up as `<stub job id> / <job name>`. The stubs fix the ids, 
 | `claude / claude-review` | `stubs/claude-review.yml` |
 | `codex / codex-review` | `stubs/codex-review.yml` |
 | `gate / auto-merge` | `stubs/auto-merge.yml` (excluded from its own evaluation) |
+| `ledger / review-ledger` | `stubs/auto-merge.yml`, after a merge only (never on an open PR's SHA) |
 
 Rename a stub job id and you must pass matching `required-checks` / `codex-check` inputs to the gate.
 
@@ -109,7 +112,25 @@ push to PR branch
         verdict → job green or red                                           + no .github/workflows/** in diff
    any red review ──► local Claude Code session fixes ──► push ──► loop
                       (or auto-fix, opt-in, ≤3 rounds)                       ──► squash merge, comment, branch deleted
+                                                                              ──► ledger: non-blocking findings ──► one issue
 ```
+
+### Non-blocking findings: the review ledger
+
+Only CRITICAL/HIGH (Claude) and P0/P1 (Codex) turn a review red. Everything below that used to live only in PR comments, and the gate merges on the first green, often seconds after the last review lands (camedu-io/crm PR #19: three Codex P2s posted 31 s before the merge, fixed in follow-up #20 that nothing tracked). Drafts do not help: `claude-review` skips drafts, so a draft has no findings to fix.
+
+So after every merge the stub's `ledger` job files **one issue per merged PR**, labeled `review-ledger`, listing:
+
+1. unresolved, not-outdated inline threads opened by a reviewer bot (Codex P2/P3, Claude MEDIUM/LOW), and
+2. list items in the latest `AUTO-REVIEW:` / `CODEX-REVIEW:` summary that sit under a `Non-blocking:` line or carry MEDIUM/LOW/P2/P3 (items marked `(inline` are skipped as duplicates).
+
+Blocking severities are dropped (a later PASS cleared them); a PR merged by hand over a CHANGES REQUESTED verdict gets a warning line. No findings, no issue. Resolve a review thread when you fix or reject it and it stays out of the ledger.
+
+Closing it: a PR whose body says `Closes #<issue>` (GitHub closes the issue on merge), or close it by hand. Such a PR **never files a ledger of its own**, which bounds the loop at one hop. Or add the label `auto-fix` (needs the `ledger-fix` stub and `AUTOFIX_PAT`): Claude checks each finding against the default branch, opens `fix/ledger-<n>` with `Closes #<n>` and a per-finding decision, and that PR runs the normal reviews and gate; if nothing needs a change it comments the decisions and closes the issue instead.
+
+Triggers: gate merges reach the ledger through the gate's `merged-prs` output, because a merge made with `GITHUB_TOKEN` fires no `pull_request: closed`; hand merges come in on `pull_request: closed`; `gh workflow run auto-merge -f ledger-pr=<n>` backfills one PR. Idempotent per PR (marker `<!-- review-ledger:pr=N -->`).
+
+Rollout: the reusable gate only gained an output, so repos on the old stub keep working and just get no ledger. Re-run `install.ps1 -Force` (or copy `stubs/auto-merge.yml`) to opt in; the new stub adds `issues: write`.
 
 Who reviews what is decided by the branch name (`<type>/<short-description>`):
 
@@ -134,7 +155,7 @@ Fix every CRITICAL/HIGH, run the verify command, commit, push. `synchronize` re-
 ### Holds
 
 - `BLOCKED` at the start of the PR title or body: the gate skips it; merge by hand. Reserved for changes that cannot be undone after merge (the PR template's "How to undo" line says so).
-- Draft PRs: not reviewed, not merged, until marked ready.
+- Draft PRs: not reviewed, not merged, until marked ready. Open PRs ready; non-blocking findings go to the ledger instead of holding the PR.
 - Any PR that changes `.github/workflows/**`: human merge.
 - Head branch under `skip-branch-prefixes` (`wo/`): the solo-harness `ship.ps1` waits on the same checks and merges these itself; the gate stays out to avoid a double-merge race.
 - A human `CHANGES_REQUESTED` review blocks until that reviewer approves or dismisses.
@@ -155,6 +176,8 @@ Branch (`fix/...` or `feat/...`), PR, let `self-check` and `self-review` run, th
 - [2026-09-17] sufnevan-sketch/evan-workspace PR #3 (fix/ branch) | `ci / *` green; `claude / claude-review` PASS in 3m56s with one real inline MEDIUM (BOM bytes uncounted), fixed in the next push; `gate / auto-merge` ran and correctly waited on Codex; `codex / codex-review` (cloud) got the bot reply "To use Codex here, create a Codex account and connect to github" | Lessons: (1) Codex ignores `@codex review` from `github-actions[bot]`; `CODEX_TRIGGER_PAT` is required, now fail-fast. (2) claude-code-action skips any PR that changes a workflow file; install PRs are hand-merge, now reported as a warning instead of "no verdict".
 
 One line per install: `[YYYY-MM-DD] <repo> | <what happened on the smoke-test PRs> | <lesson, if any>`.
+
+- [2026-10-20] camedu-io/crm PR #24 (chore/, review-ledger stubs pinned to `@feat/review-ledger`) | `gh workflow run auto-merge -f ledger-pr=19` filed #23 with the 5 unresolved bot threads (3 Codex P2, 2 Claude MEDIUM) and 2 LOWs from Claude's summary; a second dispatch logged `ledger already filed as #23, skip` | Lesson: non-blocking notes live in two places (inline threads and the PASS summary body, e.g. #16), so the ledger reads both; Claude repeats an inline MEDIUM across review rounds, which shows up as two threads until one is resolved.
 
 - [2026-09-17] sufnevan-sketch/evan-workspace PR #2 (chore/ branch, install itself) | `ci / branch-name` + `ci / verify` green on first run (verify.ps1 output visible in CI), `codex / codex-review` correctly skipped for chore/, `claude / claude-review` failed in 2s: "Secret CLAUDE_CODE_OAUTH_TOKEN is required, but not provided" because no secret was set yet | Lesson: set both secrets BEFORE opening PR 1, or expect one `gh run rerun` after setting them. Reusable-workflow calls from a private repo to this public repo resolve with no extra settings.
 - [2026-09-22] gosuperlab/website PR #119 (chore/, install itself) + PRs #120–#123 (wo/*, solo-harness) | install green first try with `setup: node-pnpm` + a new `scripts/verify.ps1` (pnpm verify + Playwright e2e under MOCK_EXTERNALS=1, 7m51s); the workflow-changing PR was correctly skipped by claude-review and hand-merged. Over the next 6 hours the harness shipped four wo/* PRs: `claude / claude-review` produced 9 CHANGES REQUESTED verdicts (all real: unscoped CHECK constraint, stuck `running` jobs, unchecked write errors, photo import wiping on re-claim, docs contradicting the repo) before each PASS, and the gate correctly left every wo/* PR to ship.ps1 | Lesson: the repo predated the template and had never been in the 2026-09-17 install batch; ship.ps1 needed two fixes to live with the template: read the verdict from the `AUTO-REVIEW:` PR review (not a comment), and wait for GitHub to register the pushed head before `gh pr checks` (it returned the previous head's red review for ~90 s). Codex review never fired: wo/* and chore/ are outside its branch types, so the second-reviewer path is still unexercised on this repo.

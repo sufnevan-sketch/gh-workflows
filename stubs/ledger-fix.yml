@@ -1,0 +1,27 @@
+# Stub, OPT-IN (install.ps1 -WithAutoFix). Adding the `auto-fix` label to a
+# `review-ledger` issue makes Claude open a `fix/ledger-<n>` PR with
+# `Closes #<n>`, which then runs the normal review loop and gate.
+# Needs the AUTOFIX_PAT secret; without it the job says so on the issue.
+name: ledger-fix
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+
+concurrency:
+  group: ledger-fix-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    if: github.event.label.name == 'auto-fix'
+    uses: sufnevan-sketch/gh-workflows/.github/workflows/ledger-fix.yml@main
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      AUTOFIX_PAT: ${{ secrets.AUTOFIX_PAT }}

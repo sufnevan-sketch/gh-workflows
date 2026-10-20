@@ -1,0 +1,232 @@
+# review-ledger.yml (reusable) — after a PR merges, file its NON-BLOCKING review
+# findings (Codex P2/P3, Claude MEDIUM/LOW) as ONE GitHub issue labeled
+# `review-ledger`, so they stop depending on someone remembering a follow-up PR.
+# Check name: "ledger / review-ledger".
+#
+# Why: the gate merges on the first green, and non-blocking findings do not turn a
+# review red. On camedu-io/crm PR #19 Codex posted three P2s 31 s before the gate
+# merged; the fixes needed a follow-up PR (#20) that nothing tracked.
+#
+# Called from the auto-merge stub, never on its own trigger:
+#   - job `ledger` with `prs: needs.gate.outputs.merged-prs` (gate merges; a merge
+#     made with GITHUB_TOKEN fires no `pull_request: closed`, so it must chain here)
+#   - `pull_request: closed` + merged (hand merges)
+#   - `workflow_dispatch` with `ledger-pr` (backfill one PR)
+#
+# What counts as a finding:
+#   1. Unresolved, not-outdated inline review threads opened by a bot in `bots`.
+#      Resolve a thread when you fix or reject it and it stays out of the ledger.
+#   2. List items in the latest AUTO-REVIEW / CODEX-REVIEW summary that sit under a
+#      `Non-blocking:` line or carry MEDIUM/LOW/P2/P3, minus ones marked `(inline`.
+#   Blocking severities (CRITICAL/HIGH/P0/P1) are dropped: a later PASS cleared them.
+#
+# Loop bound: a PR whose body closes a `review-ledger` issue (`Closes #N`) never
+# files a new one, so ledger-fix.yml's PRs cannot spawn ledgers of their own.
+# Idempotent: one issue per PR, found by the `<!-- review-ledger:pr=N -->` marker.
+name: review-ledger (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      prs:
+        description: "Comma list of merged PR numbers"
+        type: string
+        required: true
+      label:
+        type: string
+        default: review-ledger
+      fix-label:
+        description: "Label that asks ledger-fix.yml to open the fix PR (named in the issue body)"
+        type: string
+        default: auto-fix
+      bots:
+        description: "Comma list of reviewer logins whose findings are collected"
+        type: string
+        default: "claude[bot],chatgpt-codex-connector[bot],github-actions[bot]"
+    outputs:
+      issues:
+        description: "Comma list of issue numbers filed"
+        value: ${{ jobs.review-ledger.outputs.issues }}
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+jobs:
+  review-ledger:
+    name: review-ledger
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      issues: ${{ steps.ledger.outputs.issues }}
+    env:
+      PRS: ${{ inputs.prs }}
+      LABEL: ${{ inputs.label }}
+      FIX_LABEL: ${{ inputs.fix-label }}
+      BOTS: ${{ inputs.bots }}
+    steps:
+      - id: ledger
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const list = v => (v || "").split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+            const PRS = [...new Set(list(process.env.PRS).map(Number).filter(n => Number.isInteger(n) && n > 0))];
+            const LABEL = process.env.LABEL, FIX_LABEL = process.env.FIX_LABEL;
+            const BOTS = new Set(list(process.env.BOTS));
+            const BLOCKING = new Set(["CRITICAL", "HIGH", "P0", "P1"]);
+            const filed = [];
+
+            // Codex: `![P2 Badge](...)`; Claude: `path:line - MEDIUM: ...`.
+            const sevOf = t => {
+              const badge = t.match(/!\[(P[0-3]) Badge\]/);
+              if (badge) return badge[1];
+              const word = t.match(/\b(CRITICAL|HIGH|MEDIUM|LOW|P[0-3])\b/);
+              return word ? word[1] : "";
+            };
+            const clean = t => t.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/<\/?sub>/g, "").replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
+            const firstLine = t => clean((t || "").split("\n").find(l => clean(l)) || "");
+            // Drop leading `path:line` tokens (Claude inline bodies, Codex action-mode
+            // summaries) so a path like `scripts/P1-x.ts` cannot set the severity.
+            const unlocate = t => t.replace(/^(\S+:\d+\s+)+-\s*/, "");
+            const cut = (t, n) => t.length > n ? t.slice(0, n - 1) + "…" : t;
+
+            // List items under a `Non-blocking:` line, or carrying a non-blocking
+            // severity. `(inline` items duplicate a thread collected above.
+            const summaryItems = body => {
+              const out = [];
+              let inSection = false;
+              for (const raw of (body || "").split("\n").slice(1)) {
+                const l = raw.trim();
+                const item = l.match(/^(?:[-*]|\d+\.)\s+(.*)$/);
+                if (!item) {
+                  if (/non-blocking.*:\**$/i.test(l)) { inSection = true; continue; }
+                  if (l) inSection = false;
+                  continue;
+                }
+                const text = clean(item[1]);
+                if (/\(inline\b/i.test(text)) continue;
+                const sev = sevOf(unlocate(text));
+                if (BLOCKING.has(sev)) continue;
+                if (inSection || ["MEDIUM", "LOW", "P2", "P3"].includes(sev)) out.push(text);
+              }
+              return out;
+            };
+
+            // Both labels must exist before anyone can apply them. 422 = another ledger
+            // job created it a moment ago; that is success.
+            const ensureLabel = async (name, color, description) => {
+              try { await github.rest.issues.getLabel({ owner, repo, name }); }
+              catch (e) {
+                if (e.status !== 404) throw e;
+                try { await github.rest.issues.createLabel({ owner, repo, name, color, description }); }
+                catch (e2) { if (e2.status !== 422) throw e2; }
+              }
+            };
+
+            const failed = [];
+            try {
+            for (const number of PRS) {
+              const tag = `#${number}`;
+              // One PR's API error must not cost the rest of the batch their ledger.
+              try {
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+              if (!pr.merged) { core.info(`${tag}: not merged, skip`); continue; }
+              if (pr.head.repo && pr.head.repo.full_name !== `${owner}/${repo}`) { core.info(`${tag}: fork PR, skip`); continue; }
+
+              // --- Loop bound: a PR that closes a ledger issue files none ---
+              const refs = [...(pr.body || "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)/gi)].map(m => Number(m[1]));
+              let closesLedger = false;
+              for (const n of refs) {
+                try {
+                  const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number: n });
+                  if ((issue.labels || []).some(l => (l.name || l) === LABEL)) { closesLedger = true; break; }
+                } catch (e) { core.info(`${tag}: could not read #${n}: ${e.message}`); }
+              }
+              if (closesLedger) { core.info(`${tag}: closes a ${LABEL} issue, no new ledger`); continue; }
+
+              // --- Idempotency ---
+              const marker = `<!-- review-ledger:pr=${number} -->`;
+              const existing = (await github.paginate(github.rest.issues.listForRepo, { owner, repo, labels: LABEL, state: "all", per_page: 100 }))
+                .find(i => (i.body || "").includes(marker));
+              if (existing) { core.info(`${tag}: ledger already filed as #${existing.number}, skip`); continue; }
+
+              // --- 1. Unresolved, current inline threads opened by a reviewer bot ---
+              const inline = [];
+              let cursor = null;
+              do {
+                const q = await github.graphql(`
+                  query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $number) {
+                        reviewThreads(first: 100, after: $cursor) {
+                          pageInfo { hasNextPage endCursor }
+                          nodes {
+                            isResolved isOutdated path line originalLine
+                            comments(first: 1) { nodes { author { login } body url } }
+                          }
+                        }
+                      }
+                    }
+                  }`, { owner, repo, number, cursor });
+                const threads = q.repository.pullRequest.reviewThreads;
+                for (const t of threads.nodes) {
+                  const c = t.comments.nodes[0];
+                  if (!c || t.isResolved || t.isOutdated) continue;
+                  // GraphQL drops the `[bot]` suffix REST shows; match both forms.
+                  const login = c.author ? c.author.login : "";
+                  if (!BOTS.has(login) && !BOTS.has(`${login}[bot]`)) continue;
+                  const sev = sevOf(unlocate(firstLine(c.body))) || sevOf(c.body.replace(/^(\S+:\d+\s+)+/, ""));
+                  if (BLOCKING.has(sev)) continue;
+                  // Claude's inline body opens with `path:line path:line - SEV:`; keep the problem.
+                  const title = cut(unlocate(firstLine(c.body)).replace(/^(MEDIUM|LOW):\s*/, ""), 220);
+                  inline.push(`- [ ] ${sev || "note"} \`${t.path}:${t.line || t.originalLine || "?"}\` ${title} ([thread](${c.url}), ${login})`);
+                }
+                cursor = threads.pageInfo.hasNextPage ? threads.pageInfo.endCursor : null;
+              } while (cursor);
+
+              // --- 2. Non-blocking items in the latest verdict summary per reviewer ---
+              const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: number, per_page: 100 });
+              const fromSummary = [];
+              const overridden = [];
+              for (const prefix of ["AUTO-REVIEW:", "CODEX-REVIEW:"]) {
+                const latest = reviews.filter(r => r.user && BOTS.has(r.user.login) && (r.body || "").trimStart().startsWith(prefix)).pop();
+                if (!latest) continue;
+                const head = latest.body.trimStart().split("\n")[0].trim();
+                if (head.includes("CHANGES REQUESTED")) overridden.push(head);
+                for (const item of summaryItems(latest.body.trimStart())) {
+                  fromSummary.push(`- [ ] ${cut(item, 400)} ([${prefix.slice(0, -1).toLowerCase()}](${latest.html_url}))`);
+                }
+              }
+
+              if (!inline.length && !fromSummary.length && !overridden.length) { core.info(`${tag}: no non-blocking findings, nothing to file`); continue; }
+
+              // --- File ---
+              await ensureLabel(LABEL, "fbca04", "Non-blocking review findings from a merged PR");
+              await ensureLabel(FIX_LABEL, "0e8a16", "On a review-ledger issue: CI opens the fix PR (ledger-fix)");
+              const sections = [
+                marker,
+                `Non-blocking review findings left on #${number} (${pr.title}), merged at ${pr.merge_commit_sha ? pr.merge_commit_sha.slice(0, 7) : pr.head.sha.slice(0, 7)}. None of them blocked the merge; this issue is where they are tracked instead of a follow-up PR nobody remembers.`,
+              ];
+              if (overridden.length) sections.push(`> Merged over \`${overridden.join("`, `")}\`. Check the PR before trusting this list.`);
+              if (inline.length) sections.push("**Inline (unresolved threads)**\n" + inline.join("\n"));
+              if (fromSummary.length) sections.push("**From the review summaries**\n" + fromSummary.join("\n"));
+              const { data: issue } = await github.rest.issues.create({
+                owner, repo, labels: [LABEL],
+                title: cut(`Review follow-ups from #${number}: ${pr.title}`, 200),
+                body: sections.join("\n\n"),
+              });
+              await github.rest.issues.update({ owner, repo, issue_number: issue.number,
+                body: issue.body + `\n\nTo close: fix them in a PR whose description says \`Closes #${issue.number}\` (that PR files no ledger of its own), or close this by hand for findings not worth fixing. Add the label \`${FIX_LABEL}\` to have CI open that PR (needs the ledger-fix stub and \`AUTOFIX_PAT\`).` });
+              filed.push(issue.number);
+              core.notice(`${tag}: filed review ledger #${issue.number} (${inline.length} inline, ${fromSummary.length} from summaries)`);
+              } catch (e) {
+                failed.push(number);
+                core.warning(`${tag}: ledger failed: ${e.message}. Backfill: gh workflow run auto-merge -f ledger-pr=${number}`);
+              }
+            }
+            } finally {
+              core.setOutput("issues", filed.join(","));
+            }
+            if (failed.length) core.setFailed(`ledger failed for #${failed.join(", #")}`);
