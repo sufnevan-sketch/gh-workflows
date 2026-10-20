@@ -111,10 +111,30 @@ jobs:
             - MEDIUM: maintainability concern
             - LOW: style / minor
 
-            Post findings as inline PR review comments (path:line - SEVERITY: problem.
-            Suggested fix.). Post each inline comment IMMEDIATELY when you confirm a
-            finding, never batch them for the end: the session has a turn budget and
-            unposted findings are lost. Skip praise and style nits.
+            Before reviewing, read the existing review threads
+            (`gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments`).
+            Never repost a finding that already has a thread, resolved or not:
+            resolved means the author fixed it or dropped it on purpose. Repost only
+            when the earlier thread is outdated AND the problem is still present.
+
+            Every finding needs the file:line it rests on and a concrete failure
+            scenario (this input or state -> this wrong result). No scenario, no
+            finding.
+
+            Do not report:
+            - pre-existing problems the diff does not touch or make worse;
+            - style, formatting, naming, or anything a linter or formatter catches;
+            - speculative hardening with no concrete failure path in this repo;
+            - threat models or environments the project context rules out
+              (e.g. fork PRs or untrusted contributors on a private solo repo);
+            - anything listed under "Do not report" in the project context.
+
+            Post CRITICAL/HIGH findings as inline PR review comments (path:line -
+            SEVERITY: problem. Suggested fix.) IMMEDIATELY when you confirm one,
+            never batched for the end: the session has a turn budget and unposted
+            findings are lost. Collect MEDIUM/LOW findings as you go and post AT
+            MOST 3 of them, the most valuable, inline just before the summary
+            review. Skip praise.
 
             Finish by submitting EXACTLY ONE summary review with
             `gh pr review ${{ github.event.pull_request.number }} --comment --body "..."`
@@ -128,10 +148,13 @@ jobs:
 
             MEDIUM/LOW findings you could NOT post inline (no diff line to anchor
             to) go in the summary under a line exactly `Non-blocking:`, one
-            `- SEVERITY: path:line problem. Fix.` bullet each. Do not repeat
-            inline findings there. After merge a bot copies unresolved inline
-            MEDIUM/LOW threads and that section into a follow-up issue, so put
-            every non-blocking note in one of the two places and nowhere else.
+            `- SEVERITY: path:line problem. Fix.` bullet each; they count toward
+            the cap of 3. Do not repeat inline findings there. Prefer inline: the
+            author can resolve an inline thread to drop it, but not a summary
+            line. The merge gate holds the PR briefly so the author can fix or
+            drop open MEDIUM/LOW threads; whatever stays open, plus that section,
+            goes to a follow-up issue. Put every non-blocking note in one of the
+            two places and nowhere else.
 
             Work synchronously in this single session: never launch background or
             async agents (this is a headless CI run; the session ends immediately

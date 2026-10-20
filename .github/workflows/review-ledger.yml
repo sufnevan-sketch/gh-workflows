@@ -3,9 +3,16 @@
 # `review-ledger`, so they stop depending on someone remembering a follow-up PR.
 # Check name: "ledger / review-ledger".
 #
-# Why: the gate merges on the first green, and non-blocking findings do not turn a
-# review red. On camedu-io/crm PR #19 Codex posted three P2s 31 s before the gate
-# merged; the fixes needed a follow-up PR (#20) that nothing tracked.
+# Why: non-blocking findings do not turn a review red. On camedu-io/crm PR #19
+# Codex posted three P2s 31 s before the gate merged; the fixes needed a follow-up
+# PR (#20) that nothing tracked. The gate's fix window (auto-merge.yml) now gives
+# the session time to fix or drop them first; this ledger holds what is left.
+#
+# Outcomes: every merged PR with non-blocking findings also gets one
+# `<!-- review-outcomes:v1 {...} -->` comment recording each finding's severity,
+# reviewer and outcome: `addressed` (thread outdated by a push), `dropped`
+# (thread resolved), `deferred` (still open, or a summary item, so ledgered).
+# ledger-stats.ps1 aggregates these with the ledger checkboxes into fix rates.
 #
 # Called from the auto-merge stub, never on its own trigger:
 #   - job `ledger` with `prs: needs.gate.outputs.merged-prs` (gate merges; a merge
@@ -50,7 +57,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write # the outcomes comment on the merged PR
   issues: write
 
 jobs:
@@ -146,14 +153,18 @@ jobs:
               }
               if (closesLedger) { core.info(`${tag}: closes a ${LABEL} issue, no new ledger`); continue; }
 
-              // --- Idempotency ---
+              // --- Idempotency: one ledger and one outcomes comment per PR ---
               const marker = `<!-- review-ledger:pr=${number} -->`;
               const existing = (await github.paginate(github.rest.issues.listForRepo, { owner, repo, labels: LABEL, state: "all", per_page: 100 }))
                 .find(i => (i.body || "").includes(marker));
-              if (existing) { core.info(`${tag}: ledger already filed as #${existing.number}, skip`); continue; }
+              const prComments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 });
+              const hasOutcomes = prComments.some(c => (c.body || "").includes("<!-- review-outcomes:v1"));
+              if (existing && hasOutcomes) { core.info(`${tag}: ledger #${existing.number} and outcomes already recorded, skip`); continue; }
 
-              // --- 1. Unresolved, current inline threads opened by a reviewer bot ---
+              // --- 1. Inline threads opened by a reviewer bot: open ones are ledgered, all are outcomes ---
               const inline = [];
+              const outcomes = [];
+              const byOf = login => /codex|github-actions/.test(login) ? "codex" : /claude/.test(login) ? "claude" : login;
               let cursor = null;
               do {
                 const q = await github.graphql(`
@@ -173,12 +184,15 @@ jobs:
                 const threads = q.repository.pullRequest.reviewThreads;
                 for (const t of threads.nodes) {
                   const c = t.comments.nodes[0];
-                  if (!c || t.isResolved || t.isOutdated) continue;
+                  if (!c) continue;
                   // GraphQL drops the `[bot]` suffix REST shows; match both forms.
                   const login = c.author ? c.author.login : "";
                   if (!BOTS.has(login) && !BOTS.has(`${login}[bot]`)) continue;
                   const sev = sevOf(unlocate(firstLine(c.body))) || sevOf(c.body.replace(/^(\S+:\d+\s+)+/, ""));
                   if (BLOCKING.has(sev)) continue;
+                  // Outdated = the lines changed under it (a proxy for fixed); resolved = dropped.
+                  outcomes.push({ sev: sev || "note", by: byOf(login), outcome: t.isOutdated ? "addressed" : t.isResolved ? "dropped" : "deferred" });
+                  if (t.isResolved || t.isOutdated) continue;
                   // Claude's inline body opens with `path:line path:line - SEV:`; keep the problem.
                   const title = cut(unlocate(firstLine(c.body)).replace(/^(MEDIUM|LOW):\s*/, ""), 220);
                   inline.push(`- [ ] ${sev || "note"} \`${t.path}:${t.line || t.originalLine || "?"}\` ${title} ([thread](${c.url}), ${login})`);
@@ -196,11 +210,25 @@ jobs:
                 const head = latest.body.trimStart().split("\n")[0].trim();
                 if (head.includes("CHANGES REQUESTED")) overridden.push(head);
                 for (const item of summaryItems(latest.body.trimStart())) {
+                  outcomes.push({ sev: sevOf(unlocate(item)) || "note", by: prefix === "AUTO-REVIEW:" ? "claude" : "codex", outcome: "deferred" });
                   fromSummary.push(`- [ ] ${cut(item, 400)} ([${prefix.slice(0, -1).toLowerCase()}](${latest.html_url}))`);
                 }
               }
 
-              if (!inline.length && !fromSummary.length && !overridden.length) { core.info(`${tag}: no non-blocking findings, nothing to file`); continue; }
+              if (!outcomes.length && !overridden.length) { core.info(`${tag}: no non-blocking findings, nothing to file`); continue; }
+
+              const recordOutcomes = async ledgerNo => {
+                if (hasOutcomes || !outcomes.length) return;
+                const n = k => outcomes.filter(o => o.outcome === k).length;
+                const json = JSON.stringify({ pr: number, ledger: ledgerNo || null, items: outcomes });
+                await github.rest.issues.createComment({ owner, repo, issue_number: number, body:
+                  `<!-- review-outcomes:v1 ${json} -->\n📋 Non-blocking review findings: ${n("addressed")} addressed by a push, ${n("dropped")} dropped, ${n("deferred")} deferred${ledgerNo ? ` to #${ledgerNo}` : ""}.` });
+              };
+              if (existing || (!inline.length && !fromSummary.length && !overridden.length)) {
+                await recordOutcomes(existing ? existing.number : null);
+                core.info(`${tag}: ${existing ? `ledger already filed as #${existing.number}` : "nothing deferred, no ledger"}; outcomes recorded`);
+                continue;
+              }
 
               // --- File ---
               await ensureLabel(LABEL, "fbca04", "Non-blocking review findings from a merged PR");
@@ -220,6 +248,7 @@ jobs:
               await github.rest.issues.update({ owner, repo, issue_number: issue.number,
                 body: issue.body + `\n\nTo close: fix them in a PR whose description says \`Closes #${issue.number}\` (that PR files no ledger of its own), or close this by hand for findings not worth fixing. Add the label \`${FIX_LABEL}\` to have CI open that PR (needs the ledger-fix stub and \`AUTOFIX_PAT\`).` });
               filed.push(issue.number);
+              await recordOutcomes(issue.number);
               core.notice(`${tag}: filed review ledger #${issue.number} (${inline.length} inline, ${fromSummary.length} from summaries)`);
               } catch (e) {
                 failed.push(number);
