@@ -147,8 +147,12 @@ jobs:
               // merge forever even after the real run goes green (verified 2026-09-17,
               // camedu-io/crm PR #5, where opened+labeled fired one second apart).
               // GitHub's own checks UI dedupes the same way.
+              // Skip this workflow's own jobs: a gate run triggered by pull_request_review
+              // posts `gate / auto-merge` and its sibling `ledger / review-ledger` on the
+              // PR head (seen on camedu-io/crm #19), and the ledger job sits pending on
+              // `needs: gate` while an overlapping gate run evaluates.
               const newest = new Map();
-              for (const c of checkRuns.filter(c => !c.name.endsWith("auto-merge"))) {
+              for (const c of checkRuns.filter(c => !/(auto-merge|review-ledger)$/.test(c.name))) {
                 const prev = newest.get(c.name);
                 const t = c2 => new Date(c2.started_at || 0).getTime();
                 // started_at decides; id only breaks an exact tie. An `||` on id alone could
