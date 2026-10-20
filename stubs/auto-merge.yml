@@ -1,6 +1,12 @@
 # Stub. The real gate lives in sufnevan-sketch/gh-workflows. The `workflows:`
 # names below are the `name:` of the ci, claude-review, and codex-review stubs;
 # keep them in sync. Kill switch: delete this file. Check name: "gate / auto-merge".
+#
+# Job `ledger` files a merged PR's non-blocking review findings (Codex P2/P3,
+# Claude MEDIUM/LOW) as one `review-ledger` issue. It runs for gate merges (via
+# the gate's output: a GITHUB_TOKEN merge fires no `pull_request: closed`), for
+# hand merges (`pull_request: closed`), and for a backfill
+# (`gh workflow run auto-merge -f ledger-pr=<n>`).
 name: auto-merge
 
 on:
@@ -9,13 +15,21 @@ on:
     types: [completed]
   pull_request_review:
     types: [submitted]
+  pull_request:
+    types: [closed] # hand merges: review ledger only, never the gate
   workflow_dispatch: # drain: re-evaluate every open PR
+    inputs:
+      ledger-pr:
+        description: "Only file the review ledger for this merged PR number (backfill); empty = drain the gate"
+        type: string
+        default: ""
 
 permissions:
   contents: write
   pull-requests: write
   checks: read
   actions: read
+  issues: write # review ledger
 
 concurrency:
   group: auto-merge-${{ github.event.workflow_run.head_sha || github.event.pull_request.number || github.run_id }}
@@ -23,7 +37,20 @@ concurrency:
 
 jobs:
   gate:
+    if: github.event_name != 'pull_request' && !(github.event_name == 'workflow_dispatch' && inputs.ledger-pr != '')
     uses: sufnevan-sketch/gh-workflows/.github/workflows/auto-merge.yml@main
     # with:
     #   skip-branch-prefixes: "wo/"
     #   delete-branch: true
+
+  ledger:
+    needs: gate
+    if: >-
+      always() && (
+        (github.event_name == 'pull_request' && github.event.pull_request.merged) ||
+        (github.event_name == 'workflow_dispatch' && inputs.ledger-pr != '') ||
+        needs.gate.outputs.merged-prs != ''
+      )
+    uses: sufnevan-sketch/gh-workflows/.github/workflows/review-ledger.yml@main
+    with:
+      prs: ${{ (github.event_name == 'pull_request' && format('{0}', github.event.pull_request.number)) || inputs.ledger-pr || needs.gate.outputs.merged-prs }}

@@ -17,7 +17,7 @@ param(
   [string] $Verify = 'pwsh ./verify.ps1',
   [string] $WorkingDirectory = '',   # subfolder the setup + verify steps run in (wrapper repos, e.g. web)
   [string] $Ref = 'main',      # gh-workflows ref the stubs pin: main (rolling) or a tag
-  [switch] $WithAutoFix,       # also install auto-fix.yml (needs AUTOFIX_PAT secret)
+  [switch] $WithAutoFix,       # also install auto-fix.yml + ledger-fix.yml (need AUTOFIX_PAT secret)
   [switch] $Force              # overwrite stubs / PR template that already exist (review-context.md is never overwritten)
 )
 $ErrorActionPreference = 'Stop'
@@ -26,7 +26,7 @@ $Repo = (Resolve-Path -LiteralPath $Repo).Path
 if (-not (Test-Path -LiteralPath (Join-Path $Repo '.git'))) { throw "$Repo is not a git repo root (no .git). Run from the repo that owns the workflows, not a wrapper." }
 
 $stubs = @('ci.yml', 'claude-review.yml', 'codex-review.yml', 'auto-merge.yml', 'claude.yml')
-if ($WithAutoFix) { $stubs += 'auto-fix.yml' }
+if ($WithAutoFix) { $stubs += 'auto-fix.yml', 'ledger-fix.yml' }
 
 $dst = Join-Path $Repo '.github'
 New-Item -ItemType Directory -Force -Path (Join-Path $dst 'workflows') | Out-Null
@@ -83,7 +83,7 @@ Write-Host "Secrets (values in the gitignored env file, pushed by name, never pr
 Write-Host "  pwsh $PSScriptRoot\set-secrets.ps1 -Repo $name -Names $names"
 Write-Host "    CLAUDE_CODE_OAUTH_TOKEN <- claude setup-token (interactive, your terminal)"
 Write-Host "    CODEX_TRIGGER_PAT       <- GitHub PAT of your Codex-connected user (comments '@codex review'; bots are ignored)"
-if ($WithAutoFix) { Write-Host "    AUTOFIX_PAT             <- fine-grained PAT: Contents + Pull requests RW on this repo" }
+if ($WithAutoFix) { Write-Host "    AUTOFIX_PAT             <- fine-grained PAT: Contents + Pull requests + Issues RW on this repo" }
 Write-Host "  gh secret list --repo $name                              # names + dates only"
 Write-Host ""
 Write-Host "Codex second review (cloud mode, ChatGPT plan, no API key): chatgpt.com -> Codex -> Settings -> Code review:"

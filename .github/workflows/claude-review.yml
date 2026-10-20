@@ -126,6 +126,13 @@ jobs:
             parses it. If nothing is worth flagging, say so plainly. Do not
             manufacture findings.
 
+            MEDIUM/LOW findings you could NOT post inline (no diff line to anchor
+            to) go in the summary under a line exactly `Non-blocking:`, one
+            `- SEVERITY: path:line problem. Fix.` bullet each. Do not repeat
+            inline findings there. After merge a bot copies unresolved inline
+            MEDIUM/LOW threads and that section into a follow-up issue, so put
+            every non-blocking note in one of the two places and nowhere else.
+
             Work synchronously in this single session: never launch background or
             async agents (this is a headless CI run; the session ends immediately
             and background work is lost). Read files directly; do not write scratch

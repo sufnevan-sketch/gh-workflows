@@ -1,0 +1,88 @@
+# ledger-fix.yml (reusable) — OPT-IN. When someone adds the `auto-fix` label to a
+# `review-ledger` issue (see review-ledger.yml), Claude fixes the listed findings
+# on a new `fix/ledger-<issue>` branch and opens a PR whose body says
+# `Closes #<issue>`. That PR then runs the normal loop: CI, Claude + Codex review,
+# gate. When it merges, GitHub closes the issue; review-ledger.yml sees the
+# `Closes` line and files no new ledger, so the loop is bounded at one hop.
+# If every finding is already fixed or not worth fixing, Claude explains per
+# finding on the issue and closes it instead of opening an empty PR.
+#
+# Requires AUTOFIX_PAT (fine-grained: Contents + Pull requests + Issues read/write
+# on the repo). GITHUB_TOKEN cannot be used: a branch pushed and a PR opened with
+# it fire no CI and no review. With the secret unset, the job says so on the
+# issue and stops.
+name: ledger-fix (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      ledger-label:
+        type: string
+        default: review-ledger
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+      AUTOFIX_PAT:
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+
+jobs:
+  fix:
+    name: ledger-fix
+    if: github.event_name == 'issues' && github.event.issue.state == 'open' && contains(github.event.issue.labels.*.name, inputs.ledger-label)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # `secrets` is not readable in `if:`; surface presence as an env flag.
+      PAT_SET: ${{ secrets.AUTOFIX_PAT != '' }}
+      ISSUE: ${{ github.event.issue.number }}
+      BRANCH: fix/ledger-${{ github.event.issue.number }}
+    steps:
+      - name: Preconditions (PAT set, no fix PR already open)
+        id: pre
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$PAT_SET" != "true" ]; then
+            gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "🤖 ledger-fix: \`AUTOFIX_PAT\` is not set on this repo, so CI cannot open a fix PR that triggers review. Set it (\`set-secrets.ps1 -Names AUTOFIX_PAT\`) and re-add the label, or fix by hand with \`Closes #${ISSUE}\` in the PR body."
+            echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          open=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" \
+            --jq '.[] | select(.head.ref == env.BRANCH or ((.body // "") | test("(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*:?[[:space:]]+#" + env.ISSUE + "([^0-9]|$)"; "i"))) | .number' | head -n1)
+          if [ -n "$open" ]; then echo "PR #$open already targets #$ISSUE; nothing to do"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "default=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch)" >> "$GITHUB_OUTPUT"
+          echo "go=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout default branch (PAT so the push and PR trigger CI + review)
+        if: steps.pre.outputs.go == 'true'
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.AUTOFIX_PAT }}
+          ref: ${{ steps.pre.outputs.default }}
+          fetch-depth: 0
+
+      - name: Claude fixes the ledger
+        if: steps.pre.outputs.go == 'true'
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.AUTOFIX_PAT }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.AUTOFIX_PAT }}
+          additional_permissions: |
+            actions: read
+          prompt: |
+            Issue #${{ env.ISSUE }} in ${{ github.repository }} is a review ledger: non-blocking findings (Codex P2/P3, Claude MEDIUM/LOW) left on a PR that already merged. You are on `${{ steps.pre.outputs.default }}`.
+            1. Read it: `gh issue view ${{ env.ISSUE }} --comments`. Follow its links (`gh api` on the PR's comments and reviews) when a line is too short to act on.
+            2. For EACH finding decide, against the code as it is now on this branch: FIXED ALREADY (a later commit handled it), FIX (real and still present), or SKIP (false positive or not worth the change; say why). Do not refactor beyond the findings.
+            3. If nothing is FIX: post ONE comment on the issue listing every finding with its decision and one line of reason, then `gh issue close ${{ env.ISSUE }} --reason completed`. Open no PR. Stop.
+            4. Otherwise: `git switch -c ${{ env.BRANCH }}`, make the fixes, run the repo's verify command (the `verify:` input in .github/workflows/ci.yml, usually `pwsh ./verify.ps1`) and make it pass. Commit with a message that includes `[auto-fix]`, `git push -u origin ${{ env.BRANCH }}`, then
+               `gh pr create --base ${{ steps.pre.outputs.default }} --head ${{ env.BRANCH }} --title "fix: review ledger #${{ env.ISSUE }}" --body-file <file>`
+               where the body's FIRST line is exactly `Closes #${{ env.ISSUE }}`, followed by every finding with its decision (FIXED ALREADY / FIX / SKIP + reason) and the verify result. Never start the title or body with BLOCKED. Never open the PR as a draft.
+            Work synchronously in this one session; never launch background agents.
+          claude_args: '--max-turns 100 --disallowedTools "Task" --allowedTools "Bash(gh *),Bash(git *),Bash(pwsh *),Bash(npm *),Bash(pnpm *),Bash(npx *),Bash(pytest *),Bash(python *),Edit,Write,Read,Grep,Glob"'
