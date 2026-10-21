@@ -11,6 +11,9 @@
 # The gate holds a green PR up to `fix-window-minutes` while non-blocking bot
 # threads are open, so auto-fix.yml (its stub) can make one pass: fix (push), drop
 # (reply + resolve) or defer (leave open) each one. 0 = off (install.ps1 sets 0 without auto-fix).
+# No gate run waits out the window: auto-fix's pass-done review (a
+# `pull_request_review` event) or a push re-runs the gate. Past the deadline, the
+# next gate run in the repo merges it, or `gh workflow run auto-merge`.
 # Ledger expiry is off (Evan, 2026-10-20): `review-ledger` issues stay open until
 # fixed or closed by hand. To turn it on, see the template README ("Expiry").
 name: auto-merge

@@ -41,3 +41,7 @@ jobs:
     with:
       # This repo's CI check is self-check's `lint`, not `ci / verify`.
       required-checks: "lint,claude / claude-review"
+      # Fix-window canary, off unless the repo variable is set (no auto-fix stub here,
+      # so nothing acts in the window): gh variable set SELF_FIX_WINDOW_MINUTES --body 5
+      fix-window-minutes: ${{ fromJSON(vars.SELF_FIX_WINDOW_MINUTES || '0') }}
+      auto-fix-workflow: ""

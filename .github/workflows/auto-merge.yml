@@ -21,14 +21,23 @@
 #   3. every check run on the head SHA finished success/neutral/skipped, each
 #      name in required-checks is present and succeeded, and codex-check
 #      succeeded when the branch/label rule says Codex applies.
-#   4. Fix window (only when fix-window-minutes > 0): while non-blocking bot threads
-#      (Codex P2/P3, Claude MEDIUM/LOW) are unresolved and not outdated, hold until
-#      the last check's completion + the window, or until none is open, whichever
-#      comes first. One window per PR, recorded by a `<!-- fix-window:until=... -->`
-#      gate comment, so a fix push does not open a second one. Only a single-PR run
-#      sleeps; a drain logs the hold and moves on. BLOCKED during the window holds
-#      the PR past it. auto-fix.yml makes its one non-blocking pass in this window;
-#      after a `[review-fix]` commit the gate never holds the PR again.
+#   4. Fix window (only when fix-window-minutes > 0 and the repo has an active
+#      `auto-fix` workflow): while non-blocking bot threads (Codex P2/P3, Claude
+#      MEDIUM/LOW) are unresolved and not outdated, hold until auto-fix.yml's one
+#      pass is done, none is open, or the last check's completion + the window has
+#      passed, whichever comes first. One window per PR, recorded by a
+#      `<!-- fix-window:until=... -->` gate comment, so a fix push does not open a
+#      second one. BLOCKED during the window holds the PR past it. After a
+#      `[review-fix]` commit the gate never holds the PR again.
+#      No run waits for the window: a hold posts the marker and exits, because a
+#      sleeping runner is billed on a private repo. Events that already start the
+#      gate close it: a push (its checks complete), auto-fix's pass-done COMMENT
+#      review (`<!-- auto-fix:nonblocking-done -->`, made with AUTOFIX_PAT so it
+#      fires `pull_request_review`), any other review, or a dispatch. Every run
+#      also re-evaluates the other open PRs whose window has expired, so a
+#      deadline is acted on by the next gate run in the repo. With no event at all
+#      (AUTOFIX_PAT unset, auto-fix runner lost) the PR waits, never merges early:
+#      `gh workflow run auto-merge` after the deadline merges it.
 # The merge uses the caller's GITHUB_TOKEN (terminal action, nothing to cascade).
 # Output `merged-prs` lists what this run merged; the stub's `ledger` job hands it
 # to review-ledger.yml, because a GITHUB_TOKEN merge fires no `pull_request: closed`.
@@ -71,8 +80,13 @@ on:
         type: string
         default: "fix/ledger-"
       fix-window-poll-seconds:
+        description: "Ignored since the gate stopped waiting for the window (kept so callers that pass it still parse)"
         type: number
         default: 30
+      auto-fix-workflow:
+        description: "Workflow name of the caller's auto-fix stub. With no active workflow of this name the gate opens no window (nothing would act in it). Empty = skip the check."
+        type: string
+        default: "auto-fix"
       review-bots:
         description: "Reviewer logins whose unresolved threads hold the window (same list as review-ledger.yml)"
         type: string
@@ -92,8 +106,8 @@ jobs:
   auto-merge:
     name: auto-merge
     runs-on: ubuntu-latest
-    # fix-window-minutes is capped at 20 in the script, so 30 always covers a window.
-    timeout-minutes: 30
+    # The gate never waits for the window (see 4. above): a run is API calls only.
+    timeout-minutes: 10
     outputs:
       merged: ${{ steps.gate.outputs.merged }}
     env:
@@ -106,7 +120,7 @@ jobs:
       DELETE_BRANCH: ${{ inputs.delete-branch }}
       FIX_WINDOW_MINUTES: ${{ inputs.fix-window-minutes }}
       FIX_WINDOW_SKIP_PREFIXES: ${{ inputs.fix-window-skip-prefixes }}
-      FIX_WINDOW_POLL_SECONDS: ${{ inputs.fix-window-poll-seconds }}
+      AUTO_FIX_WORKFLOW: ${{ inputs.auto-fix-workflow }}
       REVIEW_BOTS: ${{ inputs.review-bots }}
     steps:
       - id: gate
@@ -122,34 +136,37 @@ jobs:
             const CODEX_LABELS = list(process.env.CODEX_LABELS);
             const WINDOW_MS = Math.min(Math.max(Number(process.env.FIX_WINDOW_MINUTES) || 0, 0), 20) * 60000;
             const WINDOW_SKIP = list(process.env.FIX_WINDOW_SKIP_PREFIXES);
-            // Floor at 5 s: a 0 or garbage input must not turn the wait into an API hammer.
-            const POLL_MS = Math.max(Number(process.env.FIX_WINDOW_POLL_SECONDS) || 30, 5) * 1000;
             const BOTS = new Set(list(process.env.REVIEW_BOTS));
             const WINDOW_MARK = /<!-- fix-window:until=([0-9T:.\-Z]+) -->/;
-            const sleep = ms => new Promise(r => setTimeout(r, ms));
+            // auto-fix.yml's pass: claimed by a github-actions[bot] comment, finished by a
+            // COMMENT review from its PAT (the event that re-runs this gate) and an edit of
+            // the claim comment (in case the review could not be posted).
+            const DONE_MARK = "<!-- auto-fix:nonblocking-done -->";
+            const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
             const openPRs = async () => github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 });
 
             // --- Candidate PR numbers, by trigger ---
             let prNumbers = [];
+            // No early return below: a run with no candidate (a red completion, CI on a push
+            // to main) still sweeps expired fix windows at the end.
             if (context.eventName === "workflow_run") {
               const run = context.payload.workflow_run;
-              if (run.conclusion !== "success") { core.info(`${run.name} concluded ${run.conclusion}; nothing to merge`); return; }
-              prNumbers = (run.pull_requests || []).map(p => p.number);
-              if (prNumbers.length === 0) {
-                // pull_requests is often empty; match open PRs by head SHA instead.
-                prNumbers = (await openPRs()).filter(p => p.head.sha === run.head_sha).map(p => p.number);
+              if (run.conclusion !== "success") core.info(`${run.name} concluded ${run.conclusion}; nothing to merge for it`);
+              else {
+                prNumbers = (run.pull_requests || []).map(p => p.number);
+                if (prNumbers.length === 0) {
+                  // pull_requests is often empty; match open PRs by head SHA instead.
+                  prNumbers = (await openPRs()).filter(p => p.head.sha === run.head_sha).map(p => p.number);
+                }
               }
             } else if (context.eventName === "pull_request_review") {
               prNumbers = [context.payload.pull_request.number];
             } else {
               prNumbers = (await openPRs()).map(p => p.number);
             }
-            if (prNumbers.length === 0) { core.info("no candidate PRs"); return; }
-            // A dispatch drain never sleeps, even when only one PR is open.
-            const DRAIN = prNumbers.length > 1 || context.eventName === "workflow_dispatch";
+            if (prNumbers.length === 0) core.info("no candidate PRs");
 
-            // Every merge condition except the fix window. Re-run on each window poll, so a
-            // push, BLOCKED, a human CHANGES_REQUESTED or a red check ends the wait.
+            // Every merge condition except the fix window.
             const evaluate = async number => {
               const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: number });
               const no = reason => ({ ok: false, reason });
@@ -186,8 +203,8 @@ jobs:
               // PR head (seen on camedu-io/crm #19), and the ledger job sits pending on
               // `needs: gate` while an overlapping gate run evaluates.
               const newest = new Map();
-              // auto-fix's check too: nothing re-runs the gate when it completes, so a pass
-              // that pushes nothing would otherwise leave a green PR waiting forever.
+              // auto-fix's check too: it runs beside the gate on the same completions and
+              // only reports back through its pass-done review, so it must not hold a merge.
               for (const c of checkRuns.filter(c => !/(auto-merge|review-ledger|auto-fix|ledger-expiry)$/.test(c.name))) {
                 const prev = newest.get(c.name);
                 const t = c2 => new Date(c2.started_at || 0).getTime();
@@ -207,7 +224,7 @@ jobs:
                 return no(`not green on ${pr.head.sha.slice(0, 7)} (pending: [${pending}] failed: [${failed}] required-missing: [${missing}])`);
               }
               const lastDone = Math.max(0, ...relevant.map(c => new Date(c.completed_at || 0).getTime()));
-              return { ok: true, pr, relevant, lastDone };
+              return { ok: true, pr, relevant, lastDone, reviews };
             };
 
             // Same severity reading as review-ledger.yml: Codex `![P2 Badge]`, Claude `path:line - MEDIUM:`.
@@ -254,57 +271,66 @@ jobs:
             // one, and a fix push cannot open a second window.
             // Only the gate's own comments count, and a marker can never push the deadline
             // past one window from now: a stray or forged far-future marker cannot hang the PR.
-            const windowUntil = async number => {
+            // The same comments carry auto-fix's claim, which it edits to DONE_MARK when its pass ends.
+            const windowState = async number => {
               const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 });
-              const marks = comments.filter(c => c.user && c.user.login === "github-actions[bot]")
-                .map(c => (c.body || "").match(WINDOW_MARK)).filter(Boolean).map(m => new Date(m[1]).getTime()).filter(t => !Number.isNaN(t));
-              return marks.length ? Math.min(Math.min(...marks), Date.now() + WINDOW_MS) : null;
+              const own = comments.filter(c => c.user && c.user.login === "github-actions[bot]");
+              const marks = own.map(c => (c.body || "").match(WINDOW_MARK)).filter(Boolean).map(m => new Date(m[1]).getTime()).filter(t => !Number.isNaN(t));
+              return {
+                until: marks.length ? Math.min(Math.min(...marks), Date.now() + WINDOW_MS) : null,
+                done: own.some(c => (c.body || "").includes(DONE_MARK)),
+              };
+            };
+            // No window when nothing would act in it: the caller has no active auto-fix stub.
+            let autoFixActive = null;
+            const hasAutoFix = async () => {
+              const name = process.env.AUTO_FIX_WORKFLOW;
+              if (!name) return true;
+              if (autoFixActive === null) {
+                const wfs = await github.paginate(github.rest.actions.listRepoWorkflows, { owner, repo, per_page: 100 });
+                autoFixActive = wfs.some(w => w.name === name && w.state === "active");
+              }
+              return autoFixActive;
             };
 
-            try {
-            for (const number of prNumbers) {
+            const handle = async number => {
               const tag = `#${number}`;
-              let ev = await evaluate(number);
-              if (!ev.ok) { core.info(`${tag}: ${ev.reason}, skip`); continue; }
+              const ev = await evaluate(number);
+              if (!ev.ok) { core.info(`${tag}: ${ev.reason}, skip`); return; }
 
-              // --- Fix window ---
+              // --- Fix window: a hold posts the marker if missing and returns. Nothing waits. ---
               let windowNote = "";
-              // One fix round per PR: once a `[review-fix]` commit exists (auto-fix.yml's
-              // non-blocking pass, or a person), the gate merges on green and the rest is ledgered.
-              const commits = await github.paginate(github.rest.pulls.listCommits, { owner, repo, pull_number: number, per_page: 100 });
-              const fixedOnce = commits.some(c => ((c.commit && c.commit.message) || "").includes("[review-fix]"));
               if (WINDOW_MS > 0 && !WINDOW_SKIP.some(p => ev.pr.head.ref.startsWith(p))) {
-                let open = await openThreads(number);
-                if (fixedOnce) core.info(`${tag}: fix round already done ([review-fix] commit), no window`);
-                let until = await windowUntil(number);
-                if (!fixedOnce && open.length && until === null && ev.lastDone + WINDOW_MS > Date.now()) {
-                  const iso = new Date(ev.lastDone + WINDOW_MS).toISOString();
-                  await github.rest.issues.createComment({ owner, repo, issue_number: number, body:
-                    `<!-- fix-window:until=${iso} -->\n⏳ Fix window: ${open.length} non-blocking review thread(s) open on ${ev.pr.head.sha.slice(0, 7)}. ` +
-                    `The gate merges at ${iso} (UTC), or sooner once none is open. Per thread: **fix** = push (put \`[review-fix]\` in the commit message); ` +
-                    `**drop** = reply with the reason and resolve it; **defer** = leave it, it goes to the \`review-ledger\` issue. ` +
-                    `\`BLOCKED\` at the start of the title holds the PR past the window. One window per PR.` });
-                  until = await windowUntil(number); // a racing gate run may have posted first; the earliest wins
-                }
-                if (!fixedOnce && open.length && until !== null && Date.now() < until) {
-                  if (DRAIN) {
-                    // A drain never sleeps. The PR's own review/CI completions normally start a
-                    // single-PR run that waits; if none is coming, re-drain after the deadline.
-                    core.notice(`${tag}: held by the fix window until ${new Date(until).toISOString()} (${open.length} thread(s)); not merged by this drain. If no other gate run is waiting on it, run \`gh workflow run auto-merge\` after that time.`);
-                    continue;
+                const open = await openThreads(number);
+                if (open.length) {
+                  // One fix round per PR: once a `[review-fix]` commit exists (auto-fix.yml's
+                  // non-blocking pass, or a person), the gate merges on green and the rest is ledgered.
+                  const commits = await github.paginate(github.rest.pulls.listCommits, { owner, repo, pull_number: number, per_page: 100 });
+                  const fixedOnce = commits.some(c => ((c.commit && c.commit.message) || "").includes("[review-fix]"));
+                  let state = await windowState(number);
+                  // auto-fix's pass-done review (its PAT, so it re-ran this gate). Only a
+                  // collaborator's review counts; a forged one could only end the window early.
+                  const doneReview = ev.reviews.some(r => TRUSTED.has(r.author_association) && (r.body || "").includes(DONE_MARK));
+                  const why = fixedOnce ? "fix round already done ([review-fix] commit)"
+                    : (state.done || doneReview) ? "auto-fix's non-blocking pass is done"
+                    : !(await hasAutoFix()) ? `no active \`${process.env.AUTO_FIX_WORKFLOW}\` workflow to act in it`
+                    : "";
+                  if (why) core.info(`${tag}: ${why}, no window`);
+                  else {
+                    if (state.until === null && ev.lastDone + WINDOW_MS > Date.now()) {
+                      const iso = new Date(ev.lastDone + WINDOW_MS).toISOString();
+                      await github.rest.issues.createComment({ owner, repo, issue_number: number, body:
+                        `<!-- fix-window:until=${iso} -->\n⏳ Fix window: ${open.length} non-blocking review thread(s) open on ${ev.pr.head.sha.slice(0, 7)}. ` +
+                        `The gate merges once auto-fix's one pass is done or none is open, and at the latest on its first run after ${iso} (UTC). Per thread: **fix** = push (put \`[review-fix]\` in the commit message); ` +
+                        `**drop** = reply with the reason and resolve it; **defer** = leave it, it goes to the \`review-ledger\` issue. ` +
+                        `\`BLOCKED\` at the start of the title holds the PR past the window. One window per PR.` });
+                      state = await windowState(number); // a racing gate run may have posted first; the earliest wins
+                    }
+                    if (state.until !== null && Date.now() < state.until) {
+                      core.notice(`${tag}: held by the fix window until ${new Date(state.until).toISOString()} (${open.length} thread(s)). No run waits: auto-fix's pass-done review, a push or a review re-runs the gate; after that time any gate run in this repo merges it (or \`gh workflow run auto-merge\`).`);
+                      return;
+                    }
                   }
-                  const sha = ev.pr.head.sha;
-                  core.info(`${tag}: fix window, ${open.length} thread(s) open, waiting until ${new Date(until).toISOString()}`);
-                  let gone = "";
-                  while (Date.now() < until) {
-                    await sleep(Math.min(POLL_MS, Math.max(until - Date.now(), 0)));
-                    ev = await evaluate(number);
-                    if (!ev.ok) { gone = ev.reason; break; }
-                    if (ev.pr.head.sha !== sha) { gone = `head moved to ${ev.pr.head.sha.slice(0, 7)}; the new head's checks decide`; break; }
-                    open = await openThreads(number);
-                    if (!open.length) break;
-                  }
-                  if (gone) { core.info(`${tag}: ${gone}, stop waiting`); continue; }
                 }
                 windowNote = open.length ? ` ${open.length} non-blocking thread(s) left open go to the review ledger.` : "";
               }
@@ -329,7 +355,26 @@ jobs:
               } catch (e) {
                 core.warning(`${tag}: merge failed: ${e.message}`);
               }
-            }
+            };
+
+            try {
+              for (const number of prNumbers) await handle(number);
+              // --- Expired windows: nothing wakes a held PR at its deadline (no run waits, and
+              // a cron would bill minutes), so every run re-evaluates the other open PRs whose
+              // window has passed. A drain already covered every open PR. A marker can only be
+              // on a PR touched within the last day + window; older PRs cost no extra call.
+              if (WINDOW_MS > 0 && context.eventName !== "workflow_dispatch") {
+                const seen = new Set(prNumbers);
+                const since = Date.now() - WINDOW_MS - 24 * 3600000;
+                for (const p of await openPRs()) {
+                  if (seen.has(p.number) || p.draft || new Date(p.updated_at).getTime() < since) continue;
+                  const { until } = await windowState(p.number);
+                  if (until === null || Date.now() < until) continue;
+                  core.info(`#${p.number}: fix window ended ${new Date(until).toISOString()}, re-evaluating`);
+                  // Another PR's API error must not turn this run red after its own merge.
+                  try { await handle(p.number); } catch (e) { core.warning(`#${p.number}: sweep failed: ${e.message}`); }
+                }
+              }
             } finally {
               // The caller's review-ledger job files non-blocking findings for these.
               // It cannot hang off `pull_request: closed`: a merge made with
