@@ -154,6 +154,39 @@ Describe 'Invoke-StubRender' {
         { Invoke-StubRender -Stubs $script:Stubs -Config $cfg2 } | Should -Throw '*not in the rendered set*'
     }
 
+    It 'empty inner with map is skipped' {
+        $cfg = New-Cfg @{ with = @{ 'ci.yml/ci' = @{} } }
+        $t = (Invoke-StubRender -Stubs $script:Stubs -Config $cfg)['.github/workflows/ci.yml']
+        $t | Should -Be (Invoke-StubRender -Stubs $script:Stubs -Config (New-Cfg))['.github/workflows/ci.yml']
+    }
+
+    It 'ledger-expiry without auto-merge.yml in the set is an error' {
+        $cfg = New-Cfg @{ stubs = @('ci.yml'); 'ledger-expiry' = $true }
+        { Invoke-StubRender -Stubs $script:Stubs -Config $cfg } | Should -Throw '*not in the rendered set*'
+    }
+
+    It 'new with inputs render in sorted key order' {
+        $cfg = New-Cfg @{ with = @{ 'claude-review.yml/claude' = [ordered]@{ zeta = '1'; alpha = '2'; mid = '3' } } }
+        $t = (Invoke-StubRender -Stubs $script:Stubs -Config $cfg)['.github/workflows/claude-review.yml']
+        $lines = $t -split "`n"
+        $i = [array]::IndexOf($lines, '    with:')
+        $lines[$i + 1] | Should -Match '^      alpha: '
+        $lines[$i + 2] | Should -Match '^      mid: '
+        $lines[$i + 3] | Should -Match '^      zeta: '
+    }
+
+    It 'a commented secrets line is never rewritten as an input' {
+        $stub = "name: x`non:`n  push:`n`njobs:`n  j:`n    uses: o/r/.github/workflows/x.yml@main`n    secrets:`n      # TOKEN: placeholder`n      REAL: `${{ secrets.REAL }}`n"
+        $cfg = New-Cfg @{ stubs = @('x.yml'); with = @{ 'x.yml/j' = @{ 'TOKEN'.ToLower() = 'v' } } }
+        $stub2 = $stub.Replace('# TOKEN:', '# token:')
+        $t = (Invoke-StubRender -Stubs @{ 'x.yml' = $stub2 } -Config $cfg)['.github/workflows/x.yml']
+        $t | Should -Match '# token: placeholder'
+        $lines = $t -split "`n"
+        $i = [array]::IndexOf($lines, '    with:')
+        $lines[$i + 1] | Should -Be '      token: v'
+        $lines[$i + 2] | Should -Be '    secrets:'
+    }
+
     It 'override for an unknown job id is an error' {
         $cfg = New-Cfg @{ with = @{ 'ci.yml/nope' = @{ 'model' = 'x' } } }
         { Invoke-StubRender -Stubs $script:Stubs -Config $cfg } | Should -Throw '*nope*'
@@ -173,6 +206,7 @@ Describe 'byte-identical to install.ps1' {
     It 'matches for <name>' -ForEach @(
         @{ name = 'defaults'; cfg = @{}; sw = @{} }
         @{ name = 'node-pnpm with auto-fix'; cfg = @{ setup = 'node-pnpm'; verify = 'pnpm verify'; 'auto-fix' = $true }; sw = @{ Setup = 'node-pnpm'; Verify = 'pnpm verify'; WithAutoFix = $true } }
+        @{ name = 'chained verify with node-npm'; cfg = @{ setup = 'node-npm'; verify = 'npm ci && npm test' }; sw = @{ Setup = 'node-npm'; Verify = 'npm ci && npm test' } }
         @{ name = 'working-directory and ref'; cfg = @{ 'working-directory' = 'web'; ref = 'v1' }; sw = @{ WorkingDirectory = 'web'; Ref = 'v1' } }
     ) {
         $repo = Join-Path $TestDrive ("repo-" + [guid]::NewGuid().ToString('N'))

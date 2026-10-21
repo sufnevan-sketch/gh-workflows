@@ -163,7 +163,13 @@ function ConvertTo-YamlScalar {
     }
     if ($Value -is [int] -or $Value -is [long]) { return ([long]$Value).ToString([cultureinfo]::InvariantCulture) }
     $s = [string]$Value
-    if ($s -cmatch '^[A-Za-z0-9./_][A-Za-z0-9 ./_=+-]*\z' -and -not $s.EndsWith(' ') -and -not (Test-YamlNonString $s)) { return $s }
+    $plain = $s.Length -gt 0 -and
+        $s -cnotmatch '^\s|\s\z' -and
+        $s -cnotmatch '^[-?:,\[\]{}#&*!|>''"%@`]' -and
+        $s -cnotmatch ': | #|:\z' -and
+        $s -cnotmatch '\p{Cc}' -and
+        -not (Test-YamlNonString $s)
+    if ($plain) { return $s }
     "'" + $s.Replace("'", "''") + "'"
 }
 

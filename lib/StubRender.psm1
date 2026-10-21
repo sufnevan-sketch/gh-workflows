@@ -95,10 +95,18 @@ function Set-JobWithInput([System.Collections.Generic.List[string]]$Lines, [stri
     $block = Find-JobBlock $Lines $StubName $JobId
     $line = '      ' + $Name + ': ' + (ConvertTo-YamlScalar $Value)
     $k = [regex]::Escape($Name)
-    $hit = Find-InBlock $Lines $block ('^\s*#\s*' + $k + ':|^\s+' + $k + ':')
-    if ($hit -ge 0) { $Lines[$hit] = $line; return }
     $withAt = Find-InBlock $Lines $block '^    with:\s*$'
-    if ($withAt -ge 0) { $Lines.Insert($withAt + 1, $line); return }
+    if ($withAt -ge 0) {
+        # The with: region: indented input lines and comments directly beneath it,
+        # ending at the first blank line or other key (e.g. secrets:).
+        $regionEnd = $withAt + 1
+        while ($regionEnd -lt $block.End -and ($Lines[$regionEnd] -match '^      \S' -or $Lines[$regionEnd] -match '^\s*#')) { $regionEnd++ }
+        for ($i = $withAt + 1; $i -lt $regionEnd; $i++) {
+            if ($Lines[$i] -match ('^\s*#\s*' + $k + ':|^\s+' + $k + ':')) { $Lines[$i] = $line; return }
+        }
+        $Lines.Insert($withAt + 1, $line)
+        return
+    }
     $usesAt = Find-InBlock $Lines $block '^    uses:'
     if ($usesAt -lt 0) { Fail "job '$JobId' in $StubName has no uses: line" }
     $Lines.Insert($usesAt + 1, $line)
@@ -151,6 +159,10 @@ function Invoke-StubRender {
         }
     }
 
+    if ($Config.'ledger-expiry' -and $names -cnotcontains 'auto-merge.yml') {
+        Fail "'ledger-expiry' needs auto-merge.yml, which is not in the rendered set"
+    }
+
     $ref = $Config.ref
     $hasAutoFix = $Config.'auto-fix' -or ($names -ccontains 'auto-fix.yml')
     $out = [System.Collections.Specialized.OrderedDictionary]::new()
@@ -165,8 +177,8 @@ function Invoke-StubRender {
         if ($name -ceq 'ci.yml') {
             $txt = $txt.Replace('__SETUP__', (ConvertTo-YamlScalar $Config.setup)).Replace('__VERIFY__', (ConvertTo-YamlScalar $Config.verify))
             if ($Config.'working-directory') {
-                $wd = $Config.'working-directory'
-                $txt = [regex]::Replace($txt, '(?m)^\s*# working-directory: web.*$', [Text.RegularExpressions.MatchEvaluator] { param($m) "      working-directory: $wd" })
+                $wdScalar = ConvertTo-YamlScalar $Config.'working-directory'
+                $txt = [regex]::Replace($txt, '(?m)^\s*# working-directory: web.*$', [Text.RegularExpressions.MatchEvaluator] { param($m) "      working-directory: $wdScalar" })
             }
         }
 
@@ -176,7 +188,11 @@ function Invoke-StubRender {
             $parts = $key.Split('/')
             if ($parts[0] -cne $name) { continue }
             $inputs = $Config.with[$key]
-            foreach ($in in @($inputs.Keys)[($inputs.Count - 1)..0]) {
+            if ($inputs.Count -eq 0) { continue }
+            $inKeys = [string[]]@($inputs.Keys)
+            [Array]::Sort($inKeys, [StringComparer]::Ordinal)
+            [Array]::Reverse($inKeys)
+            foreach ($in in $inKeys) {
                 Set-JobWithInput $lines $name $parts[1] $in $inputs[$in]
             }
         }

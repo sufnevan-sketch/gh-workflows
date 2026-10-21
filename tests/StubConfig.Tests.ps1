@@ -109,6 +109,11 @@ Describe 'ConvertTo-YamlScalar' {
     It 'emits <Expected> for <Value>' -ForEach @(
         @{ Value = 'pwsh ./verify.ps1'; Expected = 'pwsh ./verify.ps1' }
         @{ Value = 'pnpm verify'; Expected = 'pnpm verify' }
+        @{ Value = 'npm ci && npm test'; Expected = 'npm ci && npm test' }
+        @{ Value = 'npm run verify:ci'; Expected = 'npm run verify:ci' }
+        @{ Value = '-x'; Expected = "'-x'" }
+        @{ Value = 'a:'; Expected = "'a:'" }
+        @{ Value = '@x'; Expected = "'@x'" }
         @{ Value = 'a: b'; Expected = "'a: b'" }
         @{ Value = "it's # x"; Expected = "'it''s # x'" }
         @{ Value = ''; Expected = "''" }
