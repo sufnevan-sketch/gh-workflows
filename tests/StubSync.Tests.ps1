@@ -137,6 +137,7 @@ Describe 'Get-SyncAction' {
         $r = Invoke-Sync -Rendered $NewRendered -RepoFiles $OldFiles -Lock $GoodLock -Branch $br -Pr $pr
         $r.Action | Should -Be 'wait'
         $r.AutoMerge | Should -BeTrue
+        $r.BranchCurrent | Should -BeTrue
     }
 
     It 'own branch at this render with open PR and no AutoMerge holds with the reasons' {
@@ -145,6 +146,38 @@ Describe 'Get-SyncAction' {
         $r = Invoke-Sync -Rendered $NewRendered -RepoFiles $OldFiles -Lock $GoodLock -Merge manual -Branch $br -Pr $pr
         $r.Action | Should -Be 'hold'
         $r.Reasons | Should -Contain 'merge: manual'
+        $r.BranchCurrent | Should -BeTrue
+    }
+
+    It 'wait and hold keep Deletes' {
+        $files = @{ $A = "a1`n"; $Old = "old`n" }
+        $lock = New-LockObj $files
+        $br = [pscustomobject]@{ HeadSha = 'bh'; IsOwn = $true; RenderSha = 'new-render' }
+        $pr = [pscustomobject]@{ Number = 5; State = 'open'; Merged = $false; HeadSha = 'bh'; LockSha = 'new-render' }
+        $rendered = New-Rendered @{ $A = "a2`n" }
+        (Invoke-Sync -Rendered $rendered -RepoFiles $files -Lock $lock -Branch $br -Pr $pr).Deletes | Should -Be @($Old)
+        (Invoke-Sync -Rendered $rendered -RepoFiles $files -Lock $lock -Merge manual -Branch $br -Pr $pr).Deletes | Should -Be @($Old)
+    }
+
+    It 'rendered path not in lock that exists with different text is drift' {
+        $lock = New-LockObj @{ $A = "a1`n" }
+        $repo = @{ $A = "a1`n"; $B = "their own`n" }
+        $r = Invoke-Sync -Rendered $NewRendered -RepoFiles $repo -Lock $lock
+        $r.AutoMerge | Should -BeFalse
+        $r.Reasons | Should -Contain "drift: $B exists but is not in lock"
+    }
+
+    It 'closed unmerged PR with unreadable lock holds' {
+        $pr = [pscustomobject]@{ Number = 5; State = 'closed'; Merged = $false; HeadSha = 'h'; LockSha = $null }
+        $r = Invoke-Sync -Rendered $NewRendered -RepoFiles $OldFiles -Lock $GoodLock -Pr $pr
+        $r.Action | Should -Be 'hold'
+        $r.Reasons | Should -Contain 'closed by hand (lock unreadable)'
+    }
+
+    It 'no lock wins over current' {
+        $r = Invoke-Sync -Rendered (New-Rendered $OldFiles) -RepoFiles $OldFiles -Lock $null
+        $r.Action | Should -Be 'hold'
+        $r.Reasons | Should -Contain 'not adopted'
     }
 
     It 'own branch at an older render pushes' {

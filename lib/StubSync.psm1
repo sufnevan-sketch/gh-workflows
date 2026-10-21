@@ -39,8 +39,9 @@ function Get-SyncAction {
 
     if (Test-RenderedEqualsRepo $Rendered $RepoFiles) { return New-SyncResult 'current' }
 
-    if ($null -ne $Pr -and $Pr.State -eq 'closed' -and -not $Pr.Merged -and $Pr.LockSha -eq $RenderSha) {
-        return New-SyncResult 'hold' @('closed by hand')
+    if ($null -ne $Pr -and $Pr.State -eq 'closed' -and -not $Pr.Merged) {
+        if ($null -eq $Pr.LockSha) { return New-SyncResult 'hold' @('closed by hand (lock unreadable)') }
+        if ($Pr.LockSha -eq $RenderSha) { return New-SyncResult 'hold' @('closed by hand') }
     }
 
     if ($null -ne $Branch -and -not $Branch.IsOwn) {
@@ -63,9 +64,15 @@ function Get-SyncAction {
             $reasons.Add("drift: $k missing")
         }
     }
+    foreach ($k in $Rendered.Keys) {
+        if (-not $Lock.files.ContainsKey($k) -and $RepoFiles.ContainsKey($k) -and
+            -not [string]::Equals([string]$Rendered[$k], [string]$RepoFiles[$k], [StringComparison]::Ordinal)) {
+            $reasons.Add("drift: $k exists but is not in lock")
+        }
+    }
     $drift = $reasons.Count -gt 0
-    $autoMerge = (-not $drift) -and $Merge -eq 'auto'
-    if ($Merge -ne 'auto') { $reasons.Add('merge: manual') }
+    $autoMerge = (-not $drift) -and $Merge -ceq 'auto'
+    if ($Merge -cne 'auto') { $reasons.Add('merge: manual') }
 
     $branchAtRender = $null -ne $Branch -and $Branch.IsOwn -and $Branch.RenderSha -eq $RenderSha
     if ($branchAtRender) {
