@@ -106,7 +106,7 @@ Write-Host ""
 Write-Host "Codex second review (cloud mode, ChatGPT plan, no API key): chatgpt.com -> Codex -> Settings -> Code review:"
 Write-Host "  connector installed for '$($name.Split('/')[0])', repo listed, personal Auto review OFF. Codex reads AGENTS.md."
 if ($agentsMissing) {
-  Write-Warning "No AGENTS.md in this repo. It is the ONLY file Codex reads in cloud mode, so codex / codex-review will pass or fail having seen none of this repo's rules. Write one yourself (the rules a diff can break, under 2 KB) or accept a content-free verdict. This installer will not write it: AGENTS.md is the repo's file, not a CI artifact."
+  Write-Warning "No AGENTS.md in this repo. It is the ONLY file Codex reads in cloud mode, so codex / codex-review will pass or fail having seen none of this repo's rules. Write one yourself (the rules a diff can break, kept short) or accept a content-free verdict. This installer will not write it: AGENTS.md is the repo's file, not a CI artifact."
 }
 Write-Host ""
 Write-Host "Repo settings (see README):"
