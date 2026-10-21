@@ -13,7 +13,7 @@ Each repo keeps only thin stubs under `.github/workflows/` that call the workflo
 | `.github/workflows/codex-review.yml` | reusable: Codex second review on `feat/ fix/ refactor/ perf/ build/` branches or PRs labeled `codex-review` / `risk:high`. Default `mode: cloud` = Codex cloud code review from the ChatGPT plan (the job comments `@codex review`, waits for the bot's review, red on any P0/P1 finding). `mode: action` = `openai/codex-action@v1` with an API key. Either way: `CODEX-REVIEW: PASS` or `CHANGES REQUESTED`, red/green |
 | `.github/workflows/auto-merge.yml` | reusable: squash-merges when every check on the head SHA is green, required checks present, Codex present where the branch rule applies; outputs the PRs it merged |
 | `.github/workflows/review-ledger.yml` | reusable: after a merge, files the PR's non-blocking findings (Codex P2/P3, Claude MEDIUM/LOW) as one `review-ledger` issue. Called by the auto-merge stub's `ledger` job |
-| `.github/workflows/ledger-expiry.yml` | reusable: daily, marks `review-ledger` issues `stale` at 14 days and closes them as not planned at 30 (`actions/stale`). Called by the auto-merge stub's `expiry` job |
+| `.github/workflows/ledger-expiry.yml` | reusable, **not wired into the stub** (expiry is off): daily, would mark `review-ledger` issues `stale` at 14 days and close them as not planned at 30 (`actions/stale`). Called by the auto-merge stub's `expiry` job |
 | `.github/workflows/ledger-fix.yml` | reusable, opt-in: label a `review-ledger` issue `auto-fix` and Claude opens a `fix/ledger-<n>` PR with `Closes #<n>`; needs `AUTOFIX_PAT` |
 | `.github/workflows/claude.yml` | reusable: `@claude` mention handler |
 | `.github/workflows/auto-fix.yml` | reusable, opt-in (`-WithAutoFix`): CI fixes review findings so the session that opened the PR can move on. Red review (with a CHANGES REQUESTED verdict) or red `ci / *`: fixes, max 3 rounds. Green with open non-blocking threads: one pass (fix / drop / defer) inside the gate's fix window. Needs `AUTOFIX_PAT` |
@@ -82,7 +82,7 @@ A reusable job shows up as `<stub job id> / <job name>`. The stubs fix the ids, 
 | `codex / codex-review` | `stubs/codex-review.yml` |
 | `gate / auto-merge` | `stubs/auto-merge.yml` (excluded from its own evaluation) |
 | `ledger / review-ledger` | `stubs/auto-merge.yml`, after a merge only (never on an open PR's SHA) |
-| `expiry / ledger-expiry` | `stubs/auto-merge.yml`, daily schedule only |
+| `expiry / ledger-expiry` | only if you add the expiry job to a repo's auto-merge stub (off by default) |
 
 Rename a stub job id and you must pass matching `required-checks` / `codex-check` inputs to the gate.
 
@@ -142,7 +142,13 @@ Blocking severities are dropped (a later PASS cleared them); a PR merged by hand
 
 Closing it: a PR whose body says `Closes #<issue>` (GitHub closes the issue on merge), or close it by hand; tick the boxes of items you fixed, so the stats count them. Such a PR **never files a ledger of its own**, which bounds the loop at one hop. Or add the label `auto-fix` (needs the `ledger-fix` stub and `AUTOFIX_PAT`): Claude checks each finding against the default branch, ticks FIX / FIXED ALREADY items, opens `fix/ledger-<n>` with `Closes #<n>`, and that PR runs the normal reviews and gate; if nothing needs a change it comments the decisions and closes the issue instead.
 
-**3. Expiry (job `expiry`, daily).** `stale` at 14 days from creation, closed as not planned about 16 days later (around day 30-31, since the job runs once a day); comments do not reset the clock. Label `keep` exempts one. 30 days follows Sonar's "Clean as You Code", which moves an unaddressed new-code issue to the overall backlog after 30 days.
+**3. Expiry: off.** Ledger issues stay open until fixed or closed by hand (Evan, 2026-10-20). `ledger-expiry.yml` is kept for later: it marks `stale` at 14 days from creation and closes as not planned about 16 days later (day 30-31; comments do not reset the clock; label `keep` exempts one; 30 days follows Sonar's "Clean as You Code"). To turn it on in a repo, add to its `auto-merge.yml` stub a `schedule: - cron: "17 9 * * *"` trigger and
+
+```yaml
+  expiry:
+    if: github.event_name == 'schedule'
+    uses: sufnevan-sketch/gh-workflows/.github/workflows/ledger-expiry.yml@main
+```
 
 **4. Outcomes and stats.** Every merged PR with non-blocking findings gets one `<!-- review-outcomes:v1 {...} -->` comment ("📋 Non-blocking review findings: N addressed by a push, N dropped, N deferred to #M"), one entry per finding with severity and reviewer. `pwsh ledger-stats.ps1 -Repos <owner/repo>,...` turns those and the ledger checkboxes into fix rates per tier. Act on (judgment, not published norms):
 
@@ -153,7 +159,7 @@ Closing it: a PR whose body says `Closes #<issue>` (GitHub closes the issue on m
 
 Triggers: gate merges reach the ledger through the gate's `merged-prs` output, because a merge made with `GITHUB_TOKEN` fires no `pull_request: closed`; hand merges come in on `pull_request: closed`; `gh workflow run auto-merge -f ledger-pr=<n>` backfills one PR. Idempotent per PR (markers `<!-- review-ledger:pr=N -->`, `<!-- review-outcomes:v1`).
 
-Rollout: the reusable gate's window defaults to 0, so repos on an older stub keep merging on the first green and get no ledger. Recopy `stubs/auto-merge.yml` (or `install.ps1 -Force`) to opt in to all four. The `claude-review` prompt changes (dedupe, at most 3 non-blocking findings, do-not-report list) reach every repo on its next PR.
+Rollout: the reusable gate's window defaults to 0, so repos on an older stub keep merging on the first green and get no ledger. Recopy `stubs/auto-merge.yml` (or `install.ps1 -Force`) to opt in to the window, ledger and outcomes. The `claude-review` prompt changes (dedupe, at most 3 non-blocking findings, do-not-report list) reach every repo on its next PR.
 
 Who reviews what is decided by the branch name (`<type>/<short-description>`):
 

@@ -11,7 +11,8 @@
 # The gate holds a green PR up to `fix-window-minutes` while non-blocking bot
 # threads are open, so auto-fix.yml (its stub) can make one pass: fix (push), drop
 # (reply + resolve) or defer (leave open) each one. 0 = off (install.ps1 sets 0 without auto-fix).
-# Job `expiry` (daily) closes `review-ledger` issues 30 days after creation.
+# Ledger expiry is off (Evan, 2026-10-20): `review-ledger` issues stay open until
+# fixed or closed by hand. To turn it on, see the template README ("Expiry").
 name: auto-merge
 
 on:
@@ -22,8 +23,6 @@ on:
     types: [submitted]
   pull_request:
     types: [closed] # hand merges: review ledger only, never the gate
-  schedule:
-    - cron: "17 9 * * *" # daily: ledger expiry only, never the gate
   workflow_dispatch: # drain: re-evaluate every open PR
     inputs:
       ledger-pr:
@@ -63,7 +62,3 @@ jobs:
     uses: sufnevan-sketch/gh-workflows/.github/workflows/review-ledger.yml@main
     with:
       prs: ${{ (github.event_name == 'pull_request' && format('{0}', github.event.pull_request.number)) || inputs.ledger-pr || needs.gate.outputs.merged-prs }}
-
-  expiry:
-    if: github.event_name == 'schedule'
-    uses: sufnevan-sketch/gh-workflows/.github/workflows/ledger-expiry.yml@main
