@@ -50,7 +50,9 @@ foreach ($r in $Repos) {
   $prs = Invoke-Gh pr list --repo $r --state merged --search "merged:>=$since" --limit 500 --json "number,headRefName" | ConvertFrom-Json
   $mergedCount += @($prs).Count
   foreach ($p in $prs) {
-    $comments = Invoke-Gh api "repos/$r/issues/$($p.number)/comments?per_page=100" | ConvertFrom-Json
+    # All pages: the outcomes comment comes late on a busy PR.
+    $pages = Invoke-Gh api --paginate --slurp "repos/$r/issues/$($p.number)/comments?per_page=100" | ConvertFrom-Json
+    $comments = @($pages | ForEach-Object { $_ })
     $mark = @($comments | Where-Object { $_.body -match '<!-- review-outcomes:v1 (\{.*?\}) -->' }) | Select-Object -First 1
     if (-not $mark) { continue }
     $null = $mark.body -match '<!-- review-outcomes:v1 (\{.*?\}) -->'

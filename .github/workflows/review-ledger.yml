@@ -151,7 +151,6 @@ jobs:
                   if ((issue.labels || []).some(l => (l.name || l) === LABEL)) { closesLedger = true; break; }
                 } catch (e) { core.info(`${tag}: could not read #${n}: ${e.message}`); }
               }
-              if (closesLedger) { core.info(`${tag}: closes a ${LABEL} issue, no new ledger`); continue; }
 
               // --- Idempotency: one ledger and one outcomes comment per PR ---
               const marker = `<!-- review-ledger:pr=${number} -->`;
@@ -228,6 +227,12 @@ jobs:
                 await github.rest.issues.createComment({ owner, repo, issue_number: number, body:
                   `<!-- review-outcomes:v1 ${json} -->\n📋 Non-blocking review findings: ${n("addressed")} addressed by a push, ${n("dropped")} dropped, ${n("deferred")} deferred${ledgerNo ? ` to #${ledgerNo}` : ""}.` });
               };
+              // Loop bound: a PR that closes a ledger files none, but its outcomes still count.
+              if (closesLedger) {
+                await recordOutcomes(null);
+                core.info(`${tag}: closes a ${LABEL} issue, no new ledger; outcomes recorded`);
+                continue;
+              }
               if (existing || (!inline.length && !fromSummary.length && !overridden.length)) {
                 await recordOutcomes(existing ? existing.number : null);
                 core.info(`${tag}: ${existing ? `ledger already filed as #${existing.number}` : "nothing deferred, no ledger"}; outcomes recorded`);

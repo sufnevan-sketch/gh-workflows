@@ -144,6 +144,8 @@ jobs:
               prNumbers = (await openPRs()).map(p => p.number);
             }
             if (prNumbers.length === 0) { core.info("no candidate PRs"); return; }
+            // A dispatch drain never sleeps, even when only one PR is open.
+            const DRAIN = prNumbers.length > 1 || context.eventName === "workflow_dispatch";
 
             // Every merge condition except the fix window. Re-run on each window poll, so a
             // push, BLOCKED, a human CHANGES_REQUESTED or a red check ends the wait.
@@ -275,7 +277,7 @@ jobs:
                   until = await windowUntil(number); // a racing gate run may have posted first; the earliest wins
                 }
                 if (open.length && until !== null && Date.now() < until) {
-                  if (prNumbers.length > 1) {
+                  if (DRAIN) {
                     // A drain never sleeps. The PR's own review/CI completions normally start a
                     // single-PR run that waits; if none is coming, re-drain after the deadline.
                     core.notice(`${tag}: held by the fix window until ${new Date(until).toISOString()} (${open.length} thread(s)); not merged by this drain. If no other gate run is waiting on it, run \`gh workflow run auto-merge\` after that time.`);

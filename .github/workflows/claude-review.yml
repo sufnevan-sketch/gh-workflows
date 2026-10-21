@@ -116,8 +116,9 @@ jobs:
             Never post a new thread for a finding that already has one:
             - resolved: the author fixed it or dropped it on purpose; leave it.
             - unresolved and current: it is still open; leave it.
-            - unresolved and outdated, problem still present: reply on that thread
-              (`gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments/<databaseId>/replies -f body=...`), do not open a new one.
+            - unresolved and outdated, problem still present: post it again as a new
+              inline thread on the current line (it counts toward the cap). An outdated
+              thread counts as addressed, so a still-present finding must be current.
 
             Every finding needs the file:line it rests on and a concrete failure
             scenario (this input or state -> this wrong result). No scenario, no
