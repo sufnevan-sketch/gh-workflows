@@ -147,6 +147,14 @@ jobs:
             // A red review counts only with a CHANGES REQUESTED verdict on this head; a review
             // that failed for infrastructure reasons is not something a fix can address.
             const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: pr.number, per_page: 100 });
+            // A person's outstanding CHANGES_REQUESTED (latest state per reviewer, as the gate
+            // reads it) means the PR is waiting on that person: no automated edits.
+            const latestByUser = new Map();
+            for (const r of reviews) {
+              if (!r.user || !["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(r.state)) continue;
+              latestByUser.set(r.user.login, r);
+            }
+            if ([...latestByUser.values()].some(r => r.state === "CHANGES_REQUESTED")) return done(`${tag}: a reviewer has CHANGES_REQUESTED, left to them`);
             const changesRequested = reviews.some(r => r.commit_id === run.head_sha && r.user && BOTS.has(r.user.login) &&
               /^(AUTO|CODEX)-REVIEW: CHANGES REQUESTED/.test((r.body || "").trimStart()));
             const redReviews = red.filter(n => /(claude-review|codex-review)$/.test(n));
@@ -217,6 +225,18 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
+      - name: Save failed CI logs for the agent (default token, so the PAT needs no Actions access)
+        if: steps.decide.outputs.mode == 'blocking'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          : > .git/ci-failure.log
+          for id in $(gh run list --repo "$GITHUB_REPOSITORY" --commit "$HEAD_SHA" --workflow CI --status failure --json databaseId --jq '.[].databaseId'); do
+            gh run view "$id" --repo "$GITHUB_REPOSITORY" --log-failed >> .git/ci-failure.log 2>&1 || true
+          done
+          echo "saved $(wc -l < .git/ci-failure.log) lines of failed CI log"
+
       - name: Count prior blocking rounds
         id: gate
         if: steps.decide.outputs.mode == 'blocking'
@@ -248,7 +268,7 @@ jobs:
           additional_permissions: |
             actions: read
           prompt: |
-            PR #${{ steps.decide.outputs.number }} in ${{ github.repository }} is red: ${{ steps.decide.outputs.why }}. A red review means Claude `AUTO-REVIEW: CHANGES REQUESTED` and/or a Codex P0/P1 finding (`CODEX-REVIEW: CHANGES REQUESTED`); a red `ci / ...` check means the verify command fails (read it with `gh run list --commit ${{ github.event.workflow_run.head_sha }} --workflow CI` and `gh run view <id> --log-failed`). You are checked out on the PR's head commit (detached); its branch is `${{ steps.decide.outputs.head }}`.
+            PR #${{ steps.decide.outputs.number }} in ${{ github.repository }} is red: ${{ steps.decide.outputs.why }}. A red review means Claude `AUTO-REVIEW: CHANGES REQUESTED` and/or a Codex P0/P1 finding (`CODEX-REVIEW: CHANGES REQUESTED`); a red `ci / ...` check means the verify command fails (its failed log is in `.git/ci-failure.log`; read it with the Read tool). You are checked out on the PR's head commit (detached); its branch is `${{ steps.decide.outputs.head }}`.
             1. Read the latest review bodies and all inline review comments:
                gh pr view ${{ steps.decide.outputs.number }} --comments
                gh api repos/${{ github.repository }}/pulls/${{ steps.decide.outputs.number }}/reviews
@@ -274,7 +294,7 @@ jobs:
             PR #${{ steps.decide.outputs.number }} in ${{ github.repository }} passed every check but has open non-blocking review threads (Codex P2/P3, Claude MEDIUM/LOW). The merge gate is holding it for a short window so they can be handled before merge. You get exactly ONE pass. You are checked out on its branch `${{ steps.decide.outputs.head }}`.
             1. List the threads with their ids and state:
                gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100){nodes{id isResolved isOutdated path line comments(first:1){nodes{author{login} body}}}}}}}' -f o=${{ github.repository_owner }} -f r=${{ github.event.repository.name }} -F n=${{ steps.decide.outputs.number }}
-               Work only on unresolved, not-outdated threads opened by `claude` or `chatgpt-codex-connector` whose severity is MEDIUM, LOW, P2 or P3. Ignore everything else, including other people's comments.
+               Work only on unresolved, not-outdated threads whose first comment's author is in this list (GraphQL shows bot logins without the `[bot]` suffix, so match either form): `${{ inputs.review-bots }}`, and whose severity is MEDIUM, LOW, P2 or P3. Ignore everything else, including other people's comments.
             2. Decide each one against the code on this branch:
                - FIX: real, and the fix is small and inside what this PR already changes.
                - DROP: a false positive, or not worth a change. Reply on the thread with one line of reason

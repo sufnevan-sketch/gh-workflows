@@ -52,6 +52,19 @@ foreach ($s in $stubs) {
   $copied += "workflows/$s"
 }
 
+# Opt-in upgrade: an auto-merge stub installed earlier without auto-fix has a 0 window,
+# and the loop above skips existing files. Turn the window on so the pass has time.
+$am = Join-Path $dst 'workflows/auto-merge.yml'
+if ($WithAutoFix -and (Test-Path -LiteralPath $am) -and ($skipped -contains 'workflows/auto-merge.yml')) {
+  $amTxt = [IO.File]::ReadAllText($am)
+  if ($amTxt -match 'fix-window-minutes: 0\b') {
+    $new = $amTxt -replace 'fix-window-minutes: 0\b', 'fix-window-minutes: 15'
+    if ($new.Length -lt 100 -or $new -notmatch 'uses: sufnevan-sketch/gh-workflows') { throw "refusing to rewrite ${am}: unexpected content" }
+    Write-Lf $am $new
+    Write-Host "Updated : workflows/auto-merge.yml fix-window-minutes 0 -> 15 (auto-fix needs the window)"
+  }
+}
+
 $prt = Join-Path $dst 'pull_request_template.md'
 if ((Test-Path -LiteralPath $prt) -and -not $Force) { $skipped += 'pull_request_template.md' }
 else { Write-Lf $prt ([IO.File]::ReadAllText((Join-Path $src 'stubs/pull_request_template.md'))); $copied += 'pull_request_template.md' }

@@ -186,7 +186,9 @@ jobs:
               // PR head (seen on camedu-io/crm #19), and the ledger job sits pending on
               // `needs: gate` while an overlapping gate run evaluates.
               const newest = new Map();
-              for (const c of checkRuns.filter(c => !/(auto-merge|review-ledger)$/.test(c.name))) {
+              // auto-fix's check too: nothing re-runs the gate when it completes, so a pass
+              // that pushes nothing would otherwise leave a green PR waiting forever.
+              for (const c of checkRuns.filter(c => !/(auto-merge|review-ledger|auto-fix|ledger-expiry)$/.test(c.name))) {
                 const prev = newest.get(c.name);
                 const t = c2 => new Date(c2.started_at || 0).getTime();
                 // started_at decides; id only breaks an exact tie. An `||` on id alone could
