@@ -36,7 +36,8 @@ on:
         default: 20
       trigger-comment:
         type: string
-        default: "@codex review"
+        # The text after `@codex review for` is Codex's documented one-off review focus.
+        default: "@codex review for bugs in the code this PR changes; missing features, unused data and unwired inputs are follow-ups, not findings"
       context-file:
         type: string
         default: .github/review-context.md
@@ -225,6 +226,8 @@ jobs:
             2. Unmet acceptance criteria: what the PR title and body promise that the diff does not deliver.
             3. Security and data safety: injection, auth bypass, data loss, unsafe defaults.
             4. Missing tests for genuine logic. Do not demand tests for glue or config.
+            "Unmet criteria" means something the PR body names explicitly; a broad title is not a promise of every related feature.
+            Do not report missing features (data stored but not used yet, inputs not wired through, new fields or options): those are follow-ups unless the PR body names them, in which case they are unmet criteria. Still report defects in behavior the diff ships, including license or terms-of-service violations in content it renders. Do not report pre-existing problems the diff does not touch or make worse.
 
             Severity: CRITICAL = security hole, data loss, leaked secret. HIGH = real bug or unmet criterion. MEDIUM = maintainability. LOW = style.
             Verdict: PASS when there is no CRITICAL or HIGH finding; otherwise CHANGES REQUESTED.

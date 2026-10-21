@@ -1,5 +1,5 @@
 <!-- Project context for the Claude PR reviewer. Read from the base branch, so a PR cannot edit its own reviewer's instructions.
-     Codex does NOT read this file in the default cloud mode: it reads the repo's AGENTS.md (2 KB cap). Only codex-review's
+     Codex does NOT read this file in the default cloud mode: it reads the repo's AGENTS.md. Only codex-review's
      `mode: action` loads this one. Give a repo BOTH, with the same contracts, or Codex reviews with none of them.
      One short paragraph plus the contracts. Replace everything below. -->
 
