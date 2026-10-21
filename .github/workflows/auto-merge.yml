@@ -27,7 +27,8 @@
 #      comes first. One window per PR, recorded by a `<!-- fix-window:until=... -->`
 #      gate comment, so a fix push does not open a second one. Only a single-PR run
 #      sleeps; a drain logs the hold and moves on. BLOCKED during the window holds
-#      the PR past it.
+#      the PR past it. auto-fix.yml makes its one non-blocking pass in this window;
+#      after a `[review-fix]` commit the gate never holds the PR again.
 # The merge uses the caller's GITHUB_TOKEN (terminal action, nothing to cascade).
 # Output `merged-prs` lists what this run merged; the stub's `ledger` job hands it
 # to review-ledger.yml, because a GITHUB_TOKEN merge fires no `pull_request: closed`.
@@ -185,7 +186,9 @@ jobs:
               // PR head (seen on camedu-io/crm #19), and the ledger job sits pending on
               // `needs: gate` while an overlapping gate run evaluates.
               const newest = new Map();
-              for (const c of checkRuns.filter(c => !/(auto-merge|review-ledger)$/.test(c.name))) {
+              // auto-fix's check too: nothing re-runs the gate when it completes, so a pass
+              // that pushes nothing would otherwise leave a green PR waiting forever.
+              for (const c of checkRuns.filter(c => !/(auto-merge|review-ledger|auto-fix|ledger-expiry)$/.test(c.name))) {
                 const prev = newest.get(c.name);
                 const t = c2 => new Date(c2.started_at || 0).getTime();
                 // started_at decides; id only breaks an exact tie. An `||` on id alone could
@@ -208,7 +211,7 @@ jobs:
             };
 
             // Same severity reading as review-ledger.yml: Codex `![P2 Badge]`, Claude `path:line - MEDIUM:`.
-            const BLOCKING = new Set(["CRITICAL", "HIGH", "P0", "P1"]);
+            const NB = new Set(["MEDIUM", "LOW", "P2", "P3"]);
             const sevOf = t => {
               const badge = t.match(/!\[(P[0-3]) Badge\]/);
               if (badge) return badge[1];
@@ -238,7 +241,9 @@ jobs:
                   // GraphQL drops the `[bot]` suffix REST shows; match both forms.
                   const login = c.author ? c.author.login : "";
                   if (!BOTS.has(login) && !BOTS.has(`${login}[bot]`)) continue;
-                  if (BLOCKING.has(sevOf(c.body))) continue;
+                  // Only what auto-fix's pass acts on; an unrated or blocking thread
+                  // would hold the PR for the full window with nobody to handle it.
+                  if (!NB.has(sevOf(c.body))) continue;
                   open.push(t.path);
                 }
                 cursor = threads.pageInfo.hasNextPage ? threads.pageInfo.endCursor : null;
@@ -264,10 +269,15 @@ jobs:
 
               // --- Fix window ---
               let windowNote = "";
+              // One fix round per PR: once a `[review-fix]` commit exists (auto-fix.yml's
+              // non-blocking pass, or a person), the gate merges on green and the rest is ledgered.
+              const commits = await github.paginate(github.rest.pulls.listCommits, { owner, repo, pull_number: number, per_page: 100 });
+              const fixedOnce = commits.some(c => ((c.commit && c.commit.message) || "").includes("[review-fix]"));
               if (WINDOW_MS > 0 && !WINDOW_SKIP.some(p => ev.pr.head.ref.startsWith(p))) {
                 let open = await openThreads(number);
+                if (fixedOnce) core.info(`${tag}: fix round already done ([review-fix] commit), no window`);
                 let until = await windowUntil(number);
-                if (open.length && until === null && ev.lastDone + WINDOW_MS > Date.now()) {
+                if (!fixedOnce && open.length && until === null && ev.lastDone + WINDOW_MS > Date.now()) {
                   const iso = new Date(ev.lastDone + WINDOW_MS).toISOString();
                   await github.rest.issues.createComment({ owner, repo, issue_number: number, body:
                     `<!-- fix-window:until=${iso} -->\n⏳ Fix window: ${open.length} non-blocking review thread(s) open on ${ev.pr.head.sha.slice(0, 7)}. ` +
@@ -276,7 +286,7 @@ jobs:
                     `\`BLOCKED\` at the start of the title holds the PR past the window. One window per PR.` });
                   until = await windowUntil(number); // a racing gate run may have posted first; the earliest wins
                 }
-                if (open.length && until !== null && Date.now() < until) {
+                if (!fixedOnce && open.length && until !== null && Date.now() < until) {
                   if (DRAIN) {
                     // A drain never sleeps. The PR's own review/CI completions normally start a
                     // single-PR run that waits; if none is coming, re-drain after the deadline.

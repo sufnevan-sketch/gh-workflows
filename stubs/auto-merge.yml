@@ -9,8 +9,8 @@
 # (`gh workflow run auto-merge -f ledger-pr=<n>`).
 #
 # The gate holds a green PR up to `fix-window-minutes` while non-blocking bot
-# threads are open, so the PR's session can fix (push), drop (reply + resolve) or
-# defer (leave open) each one before merge. 0 turns the window off.
+# threads are open, so auto-fix.yml (its stub) can make one pass: fix (push), drop
+# (reply + resolve) or defer (leave open) each one. 0 = off (install.ps1 sets 0 without auto-fix).
 # Job `expiry` (daily) closes `review-ledger` issues 30 days after creation.
 name: auto-merge
 
@@ -48,7 +48,7 @@ jobs:
     if: github.event_name != 'pull_request' && github.event_name != 'schedule' && !(github.event_name == 'workflow_dispatch' && inputs.ledger-pr != '')
     uses: sufnevan-sketch/gh-workflows/.github/workflows/auto-merge.yml@main
     with:
-      fix-window-minutes: 10
+      fix-window-minutes: 15 # time for auto-fix.yml's non-blocking pass (estimate)
     #   skip-branch-prefixes: "wo/"
     #   delete-branch: true
 

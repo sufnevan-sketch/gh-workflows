@@ -1,6 +1,6 @@
 # gh-workflows
 
-Reusable GitHub Actions for one operator's repos: Claude reviews every PR as a red/green check, Codex gives a second review on code branches, the local Claude Code session fixes findings until green, and a gate workflow squash-merges. Public so that private repos under any owner can call it; it holds no secrets and no client data.
+Reusable GitHub Actions for one operator's repos: Claude reviews every PR as a red/green check, Codex gives a second review on code branches, CI auto-fix fixes findings (blocking ones on a red review, one pass over non-blocking ones in a short window before merge), and a gate workflow squash-merges. The session that opened the PR moves on. Public so that private repos under any owner can call it; it holds no secrets and no client data.
 
 Each repo keeps only thin stubs under `.github/workflows/` that call the workflows here. Change a workflow here, every repo runs the new version on its next PR. No copies, no drift.
 
@@ -16,7 +16,7 @@ Each repo keeps only thin stubs under `.github/workflows/` that call the workflo
 | `.github/workflows/ledger-expiry.yml` | reusable: daily, marks `review-ledger` issues `stale` at 14 days and closes them as not planned at 30 (`actions/stale`). Called by the auto-merge stub's `expiry` job |
 | `.github/workflows/ledger-fix.yml` | reusable, opt-in: label a `review-ledger` issue `auto-fix` and Claude opens a `fix/ledger-<n>` PR with `Closes #<n>`; needs `AUTOFIX_PAT` |
 | `.github/workflows/claude.yml` | reusable: `@claude` mention handler |
-| `.github/workflows/auto-fix.yml` | reusable, opt-in: Claude fixes CHANGES REQUESTED in CI, max 3 rounds, needs `AUTOFIX_PAT` |
+| `.github/workflows/auto-fix.yml` | reusable, opt-in (`-WithAutoFix`): CI fixes review findings so the session that opened the PR can move on. Red review (with a CHANGES REQUESTED verdict) or red `ci / *`: fixes, max 3 rounds. Green with open non-blocking threads: one pass (fix / drop / defer) inside the gate's fix window. Needs `AUTOFIX_PAT` |
 | `.github/workflows/self-check.yml` | this repo's CI: actionlint on workflows and stubs, stub references resolve, script bodies parse |
 | `.github/workflows/self-review.yml` | this repo dogfoods `claude-review` + `codex-review` on its own PRs |
 | `.github/workflows/self-gate.yml` | this repo's own gate: merges green PRs that touch nothing under `.github/workflows/**` |
@@ -43,7 +43,7 @@ pwsh set-secrets.ps1 -Repo <owner>/<repo>            # -Names CLAUDE_CODE_OAUTH_
 gh secret list --repo <owner>/<repo>
 ```
 
-   `CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token` (interactive, run it yourself). Do not run `gh secret set` interactively from a non-TTY tool: it stores an empty value silently.
+   `CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token` (interactive, run it yourself). A fine-grained PAT covers one owner, so `AUTOFIX_PAT` usually differs per owner: the helper reads `AUTOFIX_PAT_<OWNER>` (owner upper-cased, `-` -> `_`, e.g. `AUTOFIX_PAT_SUFNEVAN_SKETCH`) before plain `AUTOFIX_PAT`, and still sets the repo secret as `AUTOFIX_PAT`; an empty owner line is reported missing, never replaced by another owner's token. Any other line name works with `-Names AUTOFIX_PAT=<ENV_LINE>` (e.g. `AUTOFIX_PAT=AUTOFIX_PAT_CAM`). Do not run `gh secret set` interactively from a non-TTY tool: it stores an empty value silently.
 3. The **Claude Code GitHub App** must cover the repo, or `claude / claude-review` fails after ~30s with `Claude Code is not installed on this repository`. The OAuth token authenticates you; the App is what grants the action a token for THIS repo, and the two are independent. An install scoped to "selected repositories" silently excludes every new repo. Check it before the PR:
 
    ```bash
@@ -113,16 +113,17 @@ push to PR branch
         each reviewer posts ONE review, first line                           + no human CHANGES_REQUESTED
         AUTO-REVIEW: | CODEX-REVIEW: PASS | CHANGES REQUESTED                + not draft / BLOCKED / wo/* / fork
         verdict → job green or red                                           + no .github/workflows/** in diff
-   any red review ──► local Claude Code session fixes ──► push ──► loop
-                      (or auto-fix, opt-in, ≤3 rounds)                       ──► squash merge, comment, branch deleted
+   any red review ──► auto-fix (CI) fixes blocking ──► push ──► loop (≤3 rounds)
+   green + open P2/P3, MEDIUM/LOW ──► gate holds (fix window) ──► auto-fix: one pass ──► push [review-fix]
+                                                                              ──► squash merge, comment, branch deleted
                                                                               ──► ledger: non-blocking findings ──► one issue
 ```
 
 ### Non-blocking findings: fix window first, ledger for the rest
 
-Only CRITICAL/HIGH (Claude) and P0/P1 (Codex) turn a review red. The rest (Codex P2/P3, Claude MEDIUM/LOW) used to merge seconds after it was posted (camedu-io/crm PR #19: three Codex P2s 31 s before the merge, fixed in follow-up #20 that nothing tracked). Drafts do not help: `claude-review` skips drafts. The design follows the research in `EVAN_WORKSPACE/docs/review-ledger-research/` (2026-10-20): findings raised at review time get fixed (Meta's Infer: over 70%), the same findings in a post-merge list mostly do not (near 0% from batch reports; Google's Fixit: 16%). So the PR's own session gets a short window before merge, and the ledger holds only what it deliberately leaves.
+Only CRITICAL/HIGH (Claude) and P0/P1 (Codex) turn a review red. The rest (Codex P2/P3, Claude MEDIUM/LOW) used to merge seconds after it was posted (camedu-io/crm PR #19: three Codex P2s 31 s before the merge, fixed in follow-up #20 that nothing tracked). Drafts do not help: `claude-review` skips drafts. The design follows the research in `EVAN_WORKSPACE/docs/review-ledger-research/` (2026-10-20): findings raised at review time get fixed (Meta's Infer: over 70%), the same findings in a post-merge list mostly do not (near 0% from batch reports; Google's Fixit: 16%). So CI makes one fix pass in a short window before merge, and the ledger holds only what it deliberately leaves. The session that opened the PR does not watch or fix it; it moves on.
 
-**1. Fix window (gate, `fix-window-minutes`, 10 in the stub, 0 = off).** When everything is green but non-blocking bot threads are still unresolved and not outdated, the gate posts one comment (`<!-- fix-window:until=... -->`, "⏳ Fix window ...") and holds the PR until the last check's completion + 10 minutes, or until no such thread is open. Per thread the session decides:
+**1. Fix window (gate, `fix-window-minutes`, 15 in the stub, 0 = off).** When everything is green but non-blocking bot threads are still unresolved and not outdated, the gate posts one comment (`<!-- fix-window:until=... -->`, "⏳ Fix window ...") and holds the PR until the last check's completion + 15 minutes, or until no such thread is open. In that window `auto-fix.yml` (triggered by the last review to finish) makes **one pass** and decides per thread:
 
 | Decision | How | Result |
 |---|---|---|
@@ -130,7 +131,7 @@ Only CRITICAL/HIGH (Claude) and P0/P1 (Codex) turn a review red. The rest (Codex
 | drop | reply with the reason, then resolve the thread (command below) | `dropped` |
 | defer | leave it open | `deferred`, listed in the ledger |
 
-One window per PR (the comment marker is the record), so a fix push does not open a second one: after it the gate merges on green. A push during the window ends that gate run; the new head's checks decide. `BLOCKED` at the start of the title holds the PR past the window. Only a single-PR gate run sleeps (a drain logs the hold and moves on), and `fix/ledger-*` PRs get no window (no session is there). Summary-only `Non-blocking:` items cannot be resolved, so they never hold the PR; they go straight to the ledger. Cost: a held PR keeps one or two gate jobs alive up to 10 minutes each (estimate: two concurrency groups can both sleep), billed as Actions minutes.
+One fix round per PR: once a `[review-fix]` commit exists, neither the gate nor auto-fix holds or passes again, and the gate merges on green (the comment marker also allows only one window). A push during the window ends that gate run; the new head's checks decide. `BLOCKED` at the start of the title holds the PR past the window. Only a single-PR gate run sleeps (a drain logs the hold and moves on), and `fix/ledger-*` PRs get no window. 15 minutes is an estimate of auto-fix's pass time; if a pass runs longer, the gate merges first and its push lands on a deleted branch (the items go to the ledger). Without the auto-fix stub nothing acts in the window, so either install it or set the window to 0. Summary-only `Non-blocking:` items cannot be resolved, so they never hold the PR; they go straight to the ledger. Cost: a held PR keeps one or two gate jobs alive up to 15 minutes each (estimate: two concurrency groups can both sleep), billed as Actions minutes.
 
 **2. Ledger (job `ledger`).** After every merge, **one issue per merged PR**, labeled `review-ledger`, listing:
 
@@ -164,22 +165,26 @@ Who reviews what is decided by the branch name (`<type>/<short-description>`):
 
 Why `workflow_run` and not `check_suite` for the gate: GitHub does not fire `check_suite` / `check_run` events for suites created by Actions (documented recursion guard). An earlier gate with that trigger fired 0 times in 15 runs; every merge came from a PAT-posted review. Here verdicts are posted with the default `GITHUB_TOKEN` and the chain is `workflow_run`, so the merge path needs no PAT. Only `auto-fix` needs one, because a push made with `GITHUB_TOKEN` does not re-trigger CI or the reviews.
 
-### The local fix loop (Claude Code session, after opening a PR)
+### After opening a PR (Claude Code session)
+
+Open it ready (never draft) and move on: CI reviews, `auto-fix.yml` fixes, the gate merges, the ledger keeps what is left. Start independent work in a new worktree from `origin/main`; work that needs the open PR branches from its head (a stacked PR) or waits for the merge. Look at a PR only when something asks for a human:
+
+- `🤖 auto-fix stopped after 3 rounds` comment: the reviews are still red; fix by hand or close.
+- `BLOCKED` title, a change under `.github/workflows/**`, or a fork PR: merge by hand.
+- The gate did not merge: read the `gate / auto-merge` run log (every skip is `#<n>: <reason>, skip`); `gh workflow run auto-merge` re-evaluates every open PR.
 
 ```bash
-gh pr checks <n> --watch --fail-fast
+gh pr checks <n>
 gh api repos/<owner>/<repo>/pulls/<n>/reviews --jq '.[] | select(.body | test("^(AUTO|CODEX)-REVIEW")) | .body'
 gh api repos/<owner>/<repo>/pulls/<n>/comments --jq '.[] | "\(.path):\(.line // .original_line) \(.body)"'
 ```
 
-Fix every CRITICAL/HIGH, run the verify command, commit, push. `synchronize` re-runs the checks. When all are green and the gate shows a "⏳ Fix window" comment, decide each open non-blocking thread within the window: fix (push, `[review-fix]` in the message), drop (reply with the reason, then resolve), or defer (leave it). Resolve a thread:
+Fixing by hand follows the same rules as auto-fix: blocking findings: fix, run verify, push; non-blocking threads fix (`[review-fix]` in the message), drop (reply, then resolve), or defer (leave). Resolve a thread:
 
 ```bash
 gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100){nodes{id isResolved path comments(first:1){nodes{body}}}}}}}' -F n=<n> -f o=<owner> -f r=<repo>
 gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -f id=<thread id>
 ```
-
-With nothing open the gate merges within about a minute of the last completion. Reply on a comment instead of changing code when a CRITICAL/HIGH finding is a false positive. If the gate does not merge, read the `gate / auto-merge` run log: every skip reason is logged as `#<n>: <reason>, skip`. `gh workflow run auto-merge` re-evaluates every open PR.
 
 ### Holds
 

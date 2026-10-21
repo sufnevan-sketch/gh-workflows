@@ -17,7 +17,7 @@ param(
   [string] $Verify = 'pwsh ./verify.ps1',
   [string] $WorkingDirectory = '',   # subfolder the setup + verify steps run in (wrapper repos, e.g. web)
   [string] $Ref = 'main',      # gh-workflows ref the stubs pin: main (rolling) or a tag
-  [switch] $WithAutoFix,       # also install auto-fix.yml + ledger-fix.yml (need AUTOFIX_PAT secret)
+  [switch] $WithAutoFix,       # also install auto-fix.yml + ledger-fix.yml (need AUTOFIX_PAT secret); without it the fix window is 0
   [switch] $Force              # overwrite stubs / PR template that already exist (review-context.md is never overwritten)
 )
 $ErrorActionPreference = 'Stop'
@@ -40,12 +40,29 @@ foreach ($s in $stubs) {
   if ((Test-Path -LiteralPath $to) -and -not $Force) { $skipped += "workflows/$s"; continue }
   $txt = [IO.File]::ReadAllText((Join-Path $src "stubs/$s"))
   $txt = $txt -replace '@main\b', "@$Ref"
+  # The fix window is auto-fix.yml's time for its non-blocking pass; with no
+  # auto-fix stub nothing acts in it, so it would only delay merges.
+  $hasAutoFix = $WithAutoFix -or (Test-Path -LiteralPath (Join-Path $dst 'workflows/auto-fix.yml'))
+  if ($s -eq 'auto-merge.yml' -and -not $hasAutoFix) { $txt = $txt -replace 'fix-window-minutes: \d+', 'fix-window-minutes: 0' }
   if ($s -eq 'ci.yml') {
     $txt = $txt.Replace('__SETUP__', $Setup).Replace('__VERIFY__', $Verify)
     if ($WorkingDirectory) { $txt = $txt -replace '(?m)^\s*# working-directory: web.*$', "      working-directory: $WorkingDirectory" }
   }
   Write-Lf $to $txt
   $copied += "workflows/$s"
+}
+
+# Opt-in upgrade: an auto-merge stub installed earlier without auto-fix has a 0 window,
+# and the loop above skips existing files. Turn the window on so the pass has time.
+$am = Join-Path $dst 'workflows/auto-merge.yml'
+if ($WithAutoFix -and (Test-Path -LiteralPath $am) -and ($skipped -contains 'workflows/auto-merge.yml')) {
+  $amTxt = [IO.File]::ReadAllText($am)
+  if ($amTxt -match 'fix-window-minutes: 0\b') {
+    $new = $amTxt -replace 'fix-window-minutes: 0\b', 'fix-window-minutes: 15'
+    if ($new.Length -lt 100 -or $new -notmatch 'uses: sufnevan-sketch/gh-workflows') { throw "refusing to rewrite ${am}: unexpected content" }
+    Write-Lf $am $new
+    Write-Host "Updated : workflows/auto-merge.yml fix-window-minutes 0 -> 15 (auto-fix needs the window)"
+  }
 }
 
 $prt = Join-Path $dst 'pull_request_template.md'

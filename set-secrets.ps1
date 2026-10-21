@@ -7,6 +7,8 @@
   `gh secret list` (names and dates only).
 .EXAMPLE   pwsh set-secrets.ps1 -Repo sufnevan-sketch/evan-workspace
 .EXAMPLE   pwsh set-secrets.ps1 -Repo camedu-io/crm -Names CLAUDE_CODE_OAUTH_TOKEN,OPENAI_API_KEY,AUTOFIX_PAT
+.EXAMPLE   pwsh set-secrets.ps1 -Repo gosuperlab/website -Names AUTOFIX_PAT   # reads AUTOFIX_PAT_GOSUPERLAB if that line exists
+.EXAMPLE   pwsh set-secrets.ps1 -Repo camedu-io/crm -Names AUTOFIX_PAT=AUTOFIX_PAT_CAM   # secret AUTOFIX_PAT from line AUTOFIX_PAT_CAM
 .NOTES     Interactive `gh secret set` from a non-TTY stores an empty value; --body avoids that.
 #>
 [CmdletBinding()]
@@ -31,12 +33,21 @@ foreach ($line in [IO.File]::ReadAllLines($EnvFile)) {
   $vals[$k] = $v
 }
 
+# A fine-grained PAT covers one owner, so one env file can hold several tokens for the
+# same secret name: `<NAME>_<OWNER>` (owner upper-cased, non-alphanumerics -> `_`, e.g.
+# AUTOFIX_PAT_SUFNEVAN_SKETCH) wins over plain `<NAME>`. A present-but-empty owner line
+# counts as missing; it never falls back to another owner's token.
+# `SECRET=ENVLINE` in -Names names the source line explicitly (e.g. AUTOFIX_PAT=AUTOFIX_PAT_CAM)
+# and skips the owner lookup.
+$ownerKey = (($Repo -split '/')[0].ToUpperInvariant() -replace '[^A-Z0-9]', '_')
 $missing = @()
-foreach ($n in $Names) {
-  if (-not $vals.ContainsKey($n) -or [string]::IsNullOrWhiteSpace($vals[$n])) { $missing += $n; continue }
-  gh secret set $n --repo $Repo --body $vals[$n] | Out-Null
+foreach ($entry in $Names) {
+  if ($entry -match '^([^=]+)=(.+)$') { $n = $Matches[1].Trim(); $src = $Matches[2].Trim() }
+  else { $n = $entry; $src = if ($vals.ContainsKey("${n}_$ownerKey")) { "${n}_$ownerKey" } else { $n } }
+  if (-not $vals.ContainsKey($src) -or [string]::IsNullOrWhiteSpace($vals[$src])) { $missing += $src; continue }
+  gh secret set $n --repo $Repo --body $vals[$src] | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "gh secret set $n failed (exit $LASTEXITCODE)" }
-  Write-Host "set     $n ($($vals[$n].Length) chars)"
+  Write-Host "set     $n from $src ($($vals[$src].Length) chars)"
 }
 if ($missing) { Write-Host "MISSING in $EnvFile (add the value on its NAME= line, then rerun): $($missing -join ', ')" }
 

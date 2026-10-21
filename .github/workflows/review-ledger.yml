@@ -6,7 +6,7 @@
 # Why: non-blocking findings do not turn a review red. On camedu-io/crm PR #19
 # Codex posted three P2s 31 s before the gate merged; the fixes needed a follow-up
 # PR (#20) that nothing tracked. The gate's fix window (auto-merge.yml) now gives
-# the session time to fix or drop them first; this ledger holds what is left.
+# auto-fix.yml one pass to fix or drop them first; this ledger holds what is left.
 #
 # Outcomes: every merged PR with non-blocking findings also gets one
 # `<!-- review-outcomes:v1 {...} -->` comment recording each finding's severity,
