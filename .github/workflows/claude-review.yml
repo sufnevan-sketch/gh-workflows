@@ -99,8 +99,9 @@ jobs:
             Focus, in priority order:
             1. Correctness bugs: logic errors, broken edge cases, swallowed errors,
                stray debug output, secrets or credentials in the diff.
-            2. Unmet acceptance criteria: anything the PR description promises
-               that the diff does not deliver.
+            2. Unmet acceptance criteria: something the PR description names
+               explicitly that the diff does not deliver. A broad title is not a
+               promise of every related feature.
             3. Test coverage: genuine logic and acceptance criteria need covering
                tests; do not demand coverage theater for glue or config.
             4. Maintainability, only when it will plausibly cause a bug later.
@@ -126,6 +127,11 @@ jobs:
 
             Do not report:
             - pre-existing problems the diff does not touch or make worse;
+            - missing features: data stored but not used yet, inputs not wired
+              through, new fields or options. Those are follow-ups unless the PR
+              description names them. Still report defects in behavior the diff
+              ships, including license or terms-of-service violations in content
+              it renders;
             - style, formatting, naming, or anything a linter or formatter catches;
             - speculative hardening with no concrete failure path in this repo;
             - threat models or environments the project context rules out

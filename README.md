@@ -36,6 +36,18 @@ pwsh install.ps1 -Repo <repo-root> -Setup none|node-pnpm|node-npm|python -Verify
 Then in the repo:
 
 1. Fill `.github/review-context.md`: one paragraph of what the repo is, its stack, and the contracts a reviewer must hold the diff against. Claude reads it from the **base** branch, so a PR cannot rewrite its own reviewer's instructions. **Codex does not read it in cloud mode** — only `mode: action` does — it reads the repo-root `AGENTS.md`, under 2 KB. A repo with no `AGENTS.md` gets a `CODEX-REVIEW: PASS` that means "Codex found nothing", not "Codex checked our rules" (verified 2026-09-17 on `camedu-io/district-intel` and `crm`, which had neither), so `install.ps1` warns when it is absent. It does not write one: `AGENTS.md` is the repo's own file, describing rules that exist whether or not this CI is installed, and in many repos `CLAUDE.md` includes it. A CI installer authoring it would push review wording into every agent session that reads it.
+
+   The one exception is review scope. Codex's GitHub review reads a `## Code Review Rules` section in `AGENTS.md` and nothing else of ours, so without this section it asks for missing features and the PR churns (gosuperlab/superlab#157, 2026-10-21: Codex P2s asking to wire unused intake fields got built in the PR, and the new code drew new P1s). Put this section near the top of `AGENTS.md`, so a size cap can't cut it off:
+
+   ```markdown
+   ## Code Review Rules
+
+   - Review only what this PR changes. Report bugs in the code it ships: wrong behavior, broken edge cases, security or data-loss risks, and license or terms-of-service violations in content it renders.
+   - Do not report missing features: data stored but not used yet, inputs not wired through, new fields or options. These are follow-ups unless the PR description names them.
+   - Do not report pre-existing problems the diff does not touch or make worse.
+   ```
+
+   The Claude review and Codex `mode: action` prompts carry the same rule, and the default `@codex review for ...` trigger comment repeats it as a one-off focus.
 2. Secrets, before the PR. Values live once in a gitignored env file (default `EVAN_WORKSPACE/.env`, line `CLAUDE_CODE_OAUTH_TOKEN=`); the helper pushes them by name with `gh secret set --body` and never prints them:
 
 ```powershell
