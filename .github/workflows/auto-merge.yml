@@ -147,20 +147,24 @@ jobs:
 
             // --- Candidate PR numbers, by trigger ---
             let prNumbers = [];
+            // No early return below: a run with no candidate (a red completion, CI on a push
+            // to main) still sweeps expired fix windows at the end.
             if (context.eventName === "workflow_run") {
               const run = context.payload.workflow_run;
-              if (run.conclusion !== "success") { core.info(`${run.name} concluded ${run.conclusion}; nothing to merge`); return; }
-              prNumbers = (run.pull_requests || []).map(p => p.number);
-              if (prNumbers.length === 0) {
-                // pull_requests is often empty; match open PRs by head SHA instead.
-                prNumbers = (await openPRs()).filter(p => p.head.sha === run.head_sha).map(p => p.number);
+              if (run.conclusion !== "success") core.info(`${run.name} concluded ${run.conclusion}; nothing to merge for it`);
+              else {
+                prNumbers = (run.pull_requests || []).map(p => p.number);
+                if (prNumbers.length === 0) {
+                  // pull_requests is often empty; match open PRs by head SHA instead.
+                  prNumbers = (await openPRs()).filter(p => p.head.sha === run.head_sha).map(p => p.number);
+                }
               }
             } else if (context.eventName === "pull_request_review") {
               prNumbers = [context.payload.pull_request.number];
             } else {
               prNumbers = (await openPRs()).map(p => p.number);
             }
-            if (prNumbers.length === 0) { core.info("no candidate PRs"); return; }
+            if (prNumbers.length === 0) core.info("no candidate PRs");
 
             // Every merge condition except the fix window.
             const evaluate = async number => {
@@ -367,7 +371,8 @@ jobs:
                   const { until } = await windowState(p.number);
                   if (until === null || Date.now() < until) continue;
                   core.info(`#${p.number}: fix window ended ${new Date(until).toISOString()}, re-evaluating`);
-                  await handle(p.number);
+                  // Another PR's API error must not turn this run red after its own merge.
+                  try { await handle(p.number); } catch (e) { core.warning(`#${p.number}: sweep failed: ${e.message}`); }
                 }
               }
             } finally {
