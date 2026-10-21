@@ -7,6 +7,11 @@
 # the gate's output: a GITHUB_TOKEN merge fires no `pull_request: closed`), for
 # hand merges (`pull_request: closed`), and for a backfill
 # (`gh workflow run auto-merge -f ledger-pr=<n>`).
+#
+# The gate holds a green PR up to `fix-window-minutes` while non-blocking bot
+# threads are open, so the PR's session can fix (push), drop (reply + resolve) or
+# defer (leave open) each one before merge. 0 turns the window off.
+# Job `expiry` (daily) closes `review-ledger` issues 30 days after creation.
 name: auto-merge
 
 on:
@@ -17,6 +22,8 @@ on:
     types: [submitted]
   pull_request:
     types: [closed] # hand merges: review ledger only, never the gate
+  schedule:
+    - cron: "17 9 * * *" # daily: ledger expiry only, never the gate
   workflow_dispatch: # drain: re-evaluate every open PR
     inputs:
       ledger-pr:
@@ -32,14 +39,16 @@ permissions:
   issues: write # review ledger
 
 concurrency:
-  group: auto-merge-${{ github.event.workflow_run.head_sha || github.event.pull_request.number || github.run_id }}
+  # ledger-pr serializes two backfills of the same PR (gh-workflows#11).
+  group: auto-merge-${{ github.event.workflow_run.head_sha || github.event.pull_request.number || inputs.ledger-pr || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   gate:
-    if: github.event_name != 'pull_request' && !(github.event_name == 'workflow_dispatch' && inputs.ledger-pr != '')
+    if: github.event_name != 'pull_request' && github.event_name != 'schedule' && !(github.event_name == 'workflow_dispatch' && inputs.ledger-pr != '')
     uses: sufnevan-sketch/gh-workflows/.github/workflows/auto-merge.yml@main
-    # with:
+    with:
+      fix-window-minutes: 10
     #   skip-branch-prefixes: "wo/"
     #   delete-branch: true
 
@@ -54,3 +63,7 @@ jobs:
     uses: sufnevan-sketch/gh-workflows/.github/workflows/review-ledger.yml@main
     with:
       prs: ${{ (github.event_name == 'pull_request' && format('{0}', github.event.pull_request.number)) || inputs.ledger-pr || needs.gate.outputs.merged-prs }}
+
+  expiry:
+    if: github.event_name == 'schedule'
+    uses: sufnevan-sketch/gh-workflows/.github/workflows/ledger-expiry.yml@main

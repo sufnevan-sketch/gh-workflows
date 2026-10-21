@@ -1,0 +1,61 @@
+# ledger-expiry.yml (reusable) — expire `review-ledger` issues nobody acted on.
+# Check name: "expiry / ledger-expiry". Called daily by the auto-merge stub's
+# `schedule:` trigger.
+#
+# Why: post-merge lists of minor findings mostly never get fixed (Meta's Infer:
+# near 0% from batch reports vs over 70% at review time; Google's Fixit: 16%).
+# An old ledger is clutter, not a plan. Sonar's "Clean as You Code" moves an
+# unaddressed new-code issue to the overall backlog after 30 days; this does the
+# same: `stale` at 14 days from creation, closed as not planned about 16 days
+# later (day 30-31: the job runs daily, and v11 counts the close days from the
+# stale label). Unverified until the first issue crosses day 14. Activity
+# does not reset the clock (ignore-issue-updates), so a comment cannot keep an
+# item alive forever; the `keep` label exempts one on purpose.
+# Unticked items in an expired ledger count as "expired" in ledger-stats.ps1.
+name: ledger-expiry (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      label:
+        type: string
+        default: review-ledger
+      days-before-stale:
+        type: number
+        default: 14
+      days-before-close:
+        description: "Days after `stale` before closing (14 + 16 = 30 from creation)"
+        type: number
+        default: 16
+      exempt-label:
+        type: string
+        default: keep
+
+permissions:
+  issues: write
+
+jobs:
+  ledger-expiry:
+    name: ledger-expiry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/stale@v11
+        with:
+          only-issue-labels: ${{ inputs.label }}
+          exempt-issue-labels: ${{ inputs.exempt-label }}
+          days-before-issue-stale: ${{ inputs.days-before-stale }}
+          days-before-issue-close: ${{ inputs.days-before-close }}
+          days-before-pr-stale: -1
+          days-before-pr-close: -1
+          ignore-issue-updates: true
+          stale-issue-label: stale
+          close-issue-reason: not_planned
+          stale-issue-message: >-
+            This review ledger is ${{ inputs.days-before-stale }} days old. It closes as not planned
+            in ${{ inputs.days-before-close }} more days. Fix the items in a PR whose description says
+            `Closes #<this issue>`, add `auto-fix`, or add `${{ inputs.exempt-label }}` to exempt it.
+          close-issue-message: >-
+            Expired with no fix (${{ inputs.days-before-stale }} + ${{ inputs.days-before-close }} days).
+            Unticked items count as expired in the ledger stats. Reopen, or let a future review raise
+            them again if they still matter.

@@ -16,3 +16,8 @@ Reviewer priorities specific to this repo (beyond correctness, acceptance criter
 
 - <e.g. no network calls in tests; offline only>
 - <e.g. district-facing output must cite a source document>
+
+Do not report (the reviewer skips these; add a line when a finding class keeps getting dropped):
+
+- <e.g. fork-PR or untrusted-contributor threat models: private repo, single maintainer>
+- <e.g. Windows path handling in CI-only scripts: CI runs on ubuntu-latest>
