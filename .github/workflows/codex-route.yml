@@ -23,9 +23,13 @@ on:
         description: "File name of the caller's codex-review stub (the workflow to dispatch)"
         type: string
         default: codex-review.yml
+    secrets:
+      DISPATCH_TOKEN:
+        description: "PAT with Actions read/write on this repo (stubs pass CODEX_TRIGGER_PAT). A run dispatched with GITHUB_TOKEN fires no workflow_run, so the gate and auto-fix would never see the verdict (verified 2026-10-21, gh-workflows #20)."
+        required: false
 
 permissions:
-  actions: write # workflow_dispatch (GITHUB_TOKEN may dispatch; other events it makes start nothing)
+  actions: write # GITHUB_TOKEN fallback dispatch
   pull-requests: read
 
 jobs:
@@ -42,6 +46,7 @@ jobs:
       REVIEW_SHA: ${{ github.event.review.commit_id }}
       COMMENT: ${{ github.event.comment.body }}
       WORKFLOW: ${{ inputs.codex-workflow }}
+      DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
     steps:
       - name: Dispatch the verdict run when Codex reviewed the current head
         run: |
@@ -60,10 +65,16 @@ jobs:
             "$sha"*) ;;
             *) echo "Codex reviewed ${sha:0:7} but the head is ${head:0:7}: the newer push gets its own review"; exit 0 ;;
           esac
+          # Dispatch as a user (DISPATCH_TOKEN): only then does the verdict run's
+          # completion fire workflow_run, which is what re-runs the gate and auto-fix.
+          # GITHUB_TOKEN still posts the verdict, but nothing reacts to it.
           # Never red: this run's check can sit on the PR head, and a branch cut before
           # the stub update has no workflow_dispatch (422) but got its verdict the old way.
-          if gh workflow run "$WORKFLOW" --repo "$GITHUB_REPOSITORY" --ref "$ref" -f pr="$PR" -f verdict-sha="$head"; then
+          dispatch() { GH_TOKEN="$1" gh workflow run "$WORKFLOW" --repo "$GITHUB_REPOSITORY" --ref "$ref" -f pr="$PR" -f verdict-sha="$head"; }
+          if [ -n "$DISPATCH_TOKEN" ] && dispatch "$DISPATCH_TOKEN"; then
             echo "dispatched ${WORKFLOW} on ${ref} for #${PR} at ${head:0:7}" | tee -a "$GITHUB_STEP_SUMMARY"
+          elif dispatch "$GH_TOKEN"; then
+            echo "::warning::dispatched ${WORKFLOW} for #${PR} with GITHUB_TOKEN ($([ -n "$DISPATCH_TOKEN" ] && echo 'DISPATCH_TOKEN was refused: give the PAT Actions read/write' || echo 'no DISPATCH_TOKEN')): the verdict posts, but the gate and auto-fix will not re-run on it"
           else
             echo "::warning::could not dispatch ${WORKFLOW} on ${ref} (#${PR}); a branch with an older codex-review stub has no workflow_dispatch and posts its verdict by polling"
           fi
