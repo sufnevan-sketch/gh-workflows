@@ -227,7 +227,7 @@ jobs:
             3. Security and data safety: injection, auth bypass, data loss, unsafe defaults.
             4. Missing tests for genuine logic. Do not demand tests for glue or config.
             "Unmet criteria" means something the PR body names explicitly; a broad title is not a promise of every related feature.
-            Do not report missing features (data stored but not used yet, inputs not wired through, new fields or options): those are follow-ups. Still report defects in behavior the diff ships, including license or terms-of-service violations in content it renders. Do not report pre-existing problems the diff does not touch or make worse.
+            Do not report missing features (data stored but not used yet, inputs not wired through, new fields or options): those are follow-ups unless the PR body names them, in which case they are unmet criteria. Still report defects in behavior the diff ships, including license or terms-of-service violations in content it renders. Do not report pre-existing problems the diff does not touch or make worse.
 
             Severity: CRITICAL = security hole, data loss, leaked secret. HIGH = real bug or unmet criterion. MEDIUM = maintainability. LOW = style.
             Verdict: PASS when there is no CRITICAL or HIGH finding; otherwise CHANGES REQUESTED.
