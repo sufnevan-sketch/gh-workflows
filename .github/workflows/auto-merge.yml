@@ -361,13 +361,13 @@ jobs:
               for (const number of prNumbers) await handle(number);
               // --- Expired windows: nothing wakes a held PR at its deadline (no run waits, and
               // a cron would bill minutes), so every run re-evaluates the other open PRs whose
-              // window has passed. A drain already covered every open PR. A marker can only be
-              // on a PR touched within the last day + window; older PRs cost no extra call.
+              // window has passed. A drain already covered every open PR. No `updated_at`
+              // cutoff: a held PR that nothing touches stops updating, and that is exactly the
+              // PR this sweep exists for (Codex P2 on #21). Cost: one comments call per open PR.
               if (WINDOW_MS > 0 && context.eventName !== "workflow_dispatch") {
                 const seen = new Set(prNumbers);
-                const since = Date.now() - WINDOW_MS - 24 * 3600000;
                 for (const p of await openPRs()) {
-                  if (seen.has(p.number) || p.draft || new Date(p.updated_at).getTime() < since) continue;
+                  if (seen.has(p.number) || p.draft) continue;
                   const { until } = await windowState(p.number);
                   if (until === null || Date.now() < until) continue;
                   core.info(`#${p.number}: fix window ended ${new Date(until).toISOString()}, re-evaluating`);
