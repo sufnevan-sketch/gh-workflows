@@ -8,10 +8,11 @@ Set-StrictMode -Version Latest
 $script:Fields = @('ref', 'setup', 'verify', 'working-directory', 'auto-fix', 'stubs', 'merge', 'with', 'secrets', 'ledger-expiry')
 $script:SetupValues = @('none', 'node-pnpm', 'node-npm', 'python')
 $script:MergeValues = @('auto', 'manual')
-$script:JobKeyPattern = '^([a-z][a-z0-9-]*\.yml)/([A-Za-z0-9_-]+)$'
-$script:StubNamePattern = '^[a-z][a-z0-9-]*\.yml$'
-$script:InputNamePattern = '^[a-z][a-z0-9-]*$'
-$script:SecretNamePattern = '^[A-Z][A-Z0-9_]*$'
+# \z, not $: .NET's $ also matches before a final newline.
+$script:JobKeyPattern = '^([a-z][a-z0-9-]*\.yml)/([A-Za-z0-9_-]+)\z'
+$script:StubNamePattern = '^[a-z][a-z0-9-]*\.yml\z'
+$script:InputNamePattern = '^[a-z][a-z0-9-]*\z'
+$script:SecretNamePattern = '^[A-Z][A-Z0-9_]*\z'
 
 function Fail([string]$Message) {
     throw [System.ArgumentException]::new($Message)
@@ -144,6 +145,15 @@ function Test-StubConfig {
     }
 }
 
+# True when a YAML parser would read the plain scalar as something other than a string.
+function Test-YamlNonString([string]$s) {
+    $s -match '^(true|false|yes|no|on|off|y|n|null|~)\z' -or
+    $s -match '^[-+]?(\d[\d_]*(\.\d*)?|\.\d+)([eE][-+]?\d+)?\z' -or
+    $s -match '^0(x[0-9a-f_]+|o[0-7_]+|b[01_]+)\z' -or
+    $s -match '^[-+]?\.(inf|nan)\z' -or
+    $s -match '^\d{4}-\d{1,2}-\d{1,2}([Tt ].*)?\z'
+}
+
 function ConvertTo-YamlScalar {
     [CmdletBinding()]
     param([Parameter(Mandatory, Position = 0)][AllowEmptyString()]$Value)
@@ -153,7 +163,7 @@ function ConvertTo-YamlScalar {
     }
     if ($Value -is [int] -or $Value -is [long]) { return ([long]$Value).ToString([cultureinfo]::InvariantCulture) }
     $s = [string]$Value
-    if ($s -cmatch '^[A-Za-z0-9./_][A-Za-z0-9 ./_=+-]*$' -and -not $s.EndsWith(' ')) { return $s }
+    if ($s -cmatch '^[A-Za-z0-9./_][A-Za-z0-9 ./_=+-]*\z' -and -not $s.EndsWith(' ') -and -not (Test-YamlNonString $s)) { return $s }
     "'" + $s.Replace("'", "''") + "'"
 }
 

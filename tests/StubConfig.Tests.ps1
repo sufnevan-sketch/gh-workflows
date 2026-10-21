@@ -61,6 +61,18 @@ Describe 'Read-StubConfig' {
         { Read-StubConfig '{"with":{"ci.yml/ci":{"a":["x"]}}}' } | Should -Throw '*scalar*'
     }
 
+    It 'rejects a trailing newline in job keys, input names, secret names and stub entries' {
+        { Read-StubConfig '{"with":{"ci.yml/ci\n":{"a":"x"}}}' } | Should -Throw "*'with' key*"
+        { Read-StubConfig '{"with":{"ci.yml/ci":{"a\n":"x"}}}' } | Should -Throw "*input name*"
+        { Read-StubConfig '{"secrets":{"ci.yml/ci":["ABC\n"]}}' } | Should -Throw "*single line*"
+        { Read-StubConfig '{"stubs":["ci.yml\n"]}' } | Should -Throw "*single line*"
+    }
+
+    It 'rejects multi-line values in secrets and stubs' {
+        { Read-StubConfig '{"secrets":{"ci.yml/ci":["A\nB"]}}' } | Should -Throw '*single line*'
+        { Read-StubConfig '{"stubs":["ci.yml\nx"]}' } | Should -Throw '*single line*'
+    }
+
     It 'secrets are validated' {
         $ok = Read-StubConfig '{"secrets":{"ci.yml/ci":["NPM_TOKEN"]}}'
         $ok.secrets['ci.yml/ci'] | Should -Be @('NPM_TOKEN')
@@ -101,6 +113,26 @@ Describe 'ConvertTo-YamlScalar' {
         @{ Value = "it's # x"; Expected = "'it''s # x'" }
         @{ Value = ''; Expected = "''" }
         @{ Value = 'trailing '; Expected = "'trailing '" }
+        @{ Value = ' leading'; Expected = "' leading'" }
+        @{ Value = '3.10'; Expected = "'3.10'" }
+        @{ Value = '22'; Expected = "'22'" }
+        @{ Value = '+5'; Expected = "'+5'" }
+        @{ Value = '.5'; Expected = "'.5'" }
+        @{ Value = '1e3'; Expected = "'1e3'" }
+        @{ Value = '1.0e-3'; Expected = "'1.0e-3'" }
+        @{ Value = '0x1F'; Expected = "'0x1F'" }
+        @{ Value = '0o17'; Expected = "'0o17'" }
+        @{ Value = '0b101'; Expected = "'0b101'" }
+        @{ Value = '.inf'; Expected = "'.inf'" }
+        @{ Value = '.NaN'; Expected = "'.NaN'" }
+        @{ Value = 'true'; Expected = "'true'" }
+        @{ Value = 'No'; Expected = "'No'" }
+        @{ Value = 'OFF'; Expected = "'OFF'" }
+        @{ Value = 'y'; Expected = "'y'" }
+        @{ Value = 'null'; Expected = "'null'" }
+        @{ Value = 'NULL'; Expected = "'NULL'" }
+        @{ Value = '~'; Expected = "'~'" }
+        @{ Value = '2026-10-21'; Expected = "'2026-10-21'" }
         @{ Value = $true; Expected = 'true' }
         @{ Value = $false; Expected = 'false' }
         @{ Value = 15; Expected = '15' }
