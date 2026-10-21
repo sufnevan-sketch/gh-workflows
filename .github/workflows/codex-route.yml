@@ -60,5 +60,10 @@ jobs:
             "$sha"*) ;;
             *) echo "Codex reviewed ${sha:0:7} but the head is ${head:0:7}: the newer push gets its own review"; exit 0 ;;
           esac
-          gh workflow run "$WORKFLOW" --repo "$GITHUB_REPOSITORY" --ref "$ref" -f pr="$PR" -f verdict-sha="$head"
-          echo "dispatched ${WORKFLOW} on ${ref} for #${PR} at ${head:0:7}" | tee -a "$GITHUB_STEP_SUMMARY"
+          # Never red: this run's check can sit on the PR head, and a branch cut before
+          # the stub update has no workflow_dispatch (422) but got its verdict the old way.
+          if gh workflow run "$WORKFLOW" --repo "$GITHUB_REPOSITORY" --ref "$ref" -f pr="$PR" -f verdict-sha="$head"; then
+            echo "dispatched ${WORKFLOW} on ${ref} for #${PR} at ${head:0:7}" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::could not dispatch ${WORKFLOW} on ${ref} (#${PR}); a branch with an older codex-review stub has no workflow_dispatch and posts its verdict by polling"
+          fi

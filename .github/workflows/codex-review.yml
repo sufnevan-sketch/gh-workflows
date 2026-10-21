@@ -92,6 +92,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       docs-only: ${{ steps.docs.outputs.docs-only }}
+      already-reviewed: ${{ steps.ask.outputs.already-reviewed }}
     env:
       PR: ${{ github.event.pull_request.number }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -112,6 +113,7 @@ jobs:
           echo "docs-only=${docs}" >> "$GITHUB_OUTPUT"
 
       - name: Ask Codex for a review (cloud)
+        id: ask
         if: steps.docs.outputs.docs-only != 'true'
         env:
           GH_TOKEN: ${{ secrets.CODEX_TRIGGER_PAT }}
@@ -131,6 +133,10 @@ jobs:
           have_clean=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments?per_page=100" \
             --jq '[.[] | select(.user.login == env.CODEX_BOT and (.body | contains("Reviewed commit")) and (.body | contains(env.SHA10)))] | length')
           if [ "${have:-0}" -gt 0 ] || [ "${have_clean:-0}" -gt 0 ]; then
+            # A same-SHA re-trigger (labeled, reopened) after the verdict: codex-review
+            # must re-read the answer in THIS run, or its newer skipped check would
+            # displace the green one and nothing would ever dispatch another verdict.
+            echo "already-reviewed=true" >> "$GITHUB_OUTPUT"
             echo "Codex already reviewed ${HEAD_SHA:0:7}; not re-asking"; exit 0
           fi
           gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "${TRIGGER} (commit ${HEAD_SHA:0:7}; requested by the codex-review check)"
@@ -175,11 +181,12 @@ jobs:
           elif [ "$state" != "open $SHA" ]; then
             echo "PR #${PR} is not open at ${SHA:0:7} (${state})"
           else
-            # Idempotent: Codex can answer with a review and a comment, and an
-            # old-stub run may already have posted the verdict for this commit.
-            posted=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews?per_page=100" \
-              --jq '.[] | select(.user.login == "github-actions[bot]" and .commit_id == env.SHA and (.body | startswith("CODEX-REVIEW:"))) | .id' | grep -c . || true)
-            if [ "${posted:-0}" -gt 0 ]; then echo "verdict for ${SHA:0:7} already posted"; else go=true; fi
+            # Even when a verdict for this SHA is already posted (Codex answered with
+            # a review AND a comment, or an old-stub run got there first), run it
+            # again: a skipped codex-review here would be the newest check on the
+            # head and displace the green one. Same answer, same verdict; the verdict
+            # step does not post a duplicate review.
+            go=true
           fi
           echo "go=${go}" >> "$GITHUB_OUTPUT"
 
@@ -192,7 +199,8 @@ jobs:
     if: >-
       always() && needs.codex-request.result != 'failure' && needs.codex-request.result != 'cancelled' && ((
         github.event_name == 'pull_request' &&
-        (inputs.wait || inputs.mode == 'action' || needs.codex-request.outputs.docs-only == 'true') &&
+        (inputs.wait || inputs.mode == 'action' || needs.codex-request.outputs.docs-only == 'true' ||
+         needs.codex-request.outputs.already-reviewed == 'true') &&
         !github.event.pull_request.draft && (
           startsWith(github.head_ref, 'feat/') ||
           startsWith(github.head_ref, 'fix/') ||
@@ -266,7 +274,15 @@ jobs:
             echo "Codex cloud review of ${HEAD_SHA:0:7}: ${count} P0/P1 finding(s). Inline comments by ${CODEX_BOT} are the source; this summary is parsed by the merge gate."
             if [ "$count" -gt 0 ]; then echo; echo "Findings:"; printf '%s\n' "$findings" | nl -w1 -s'. '; fi
           } > /tmp/verdict.md
-          gh pr review "$PR" --repo "$GITHUB_REPOSITORY" --comment --body-file /tmp/verdict.md
+          # A re-read of the same answer (same-SHA re-trigger, second dispatch) posts no duplicate.
+          export FIRST="CODEX-REVIEW: ${verdict}"
+          posted=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews?per_page=100" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and .commit_id == env.HEAD_SHA and (.body | startswith(env.FIRST))) | .id' | grep -c . || true)
+          if [ "${posted:-0}" -eq 0 ]; then
+            gh pr review "$PR" --repo "$GITHUB_REPOSITORY" --comment --body-file /tmp/verdict.md
+          else
+            echo "verdict for ${HEAD_SHA:0:7} already posted; not posting it again"
+          fi
           cat /tmp/verdict.md >> "$GITHUB_STEP_SUMMARY"
           echo "verdict=${verdict}" >> "$GITHUB_OUTPUT"
           if [ "$verdict" != "PASS" ]; then echo "::error::Codex found ${count} P0/P1 issue(s); see the inline comments on PR #${PR}"; exit 1; fi
