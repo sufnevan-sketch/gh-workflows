@@ -19,6 +19,7 @@ param(
   [string] $Ref = 'main',      # gh-workflows ref the stubs pin: main (rolling) or a tag
   [ValidateSet('auto', 'manual')] [string] $Merge = 'auto',   # recorded in .github/gh-workflows.json
   [switch] $WithAutoFix,       # also install auto-fix.yml + ledger-fix.yml (need AUTOFIX_PAT secret); without it the fix window is 0
+  [switch] $Adopt,             # infer .github/gh-workflows.json + .lock from an existing install; writes no stub
   [switch] $Force              # overwrite stubs / PR template that already exist (review-context.md is never overwritten)
 )
 $ErrorActionPreference = 'Stop'
@@ -29,7 +30,6 @@ $Repo = (Resolve-Path -LiteralPath $Repo).Path
 if (-not (Test-Path -LiteralPath (Join-Path $Repo '.git'))) { throw "$Repo is not a git repo root (no .git). Run from the repo that owns the workflows, not a wrapper." }
 
 $dst = Join-Path $Repo '.github'
-New-Item -ItemType Directory -Force -Path (Join-Path $dst 'workflows') | Out-Null
 $utf8 = [Text.UTF8Encoding]::new($false)
 $copied = @(); $skipped = @()
 
@@ -39,6 +39,54 @@ function Invoke-Git([string[]] $GitArgs) {
   if ($LASTEXITCODE -ne 0) { throw "git $($GitArgs -join ' ') failed in $src" }
   $o
 }
+
+if ($Adopt) {
+  # Adoption: an install made by an older install.ps1 has stubs but no config or lock. Infer the
+  # config, find the gh-workflows commit the stubs were rendered from, write config + lock only.
+  # Never writes a stub, the PR template or review-context.md. GHW_STUB_SHA (test hook) is the head.
+  Import-Module (Join-Path $src 'lib/StubAdopt.psm1') -Force
+  $adoptCfg = Join-Path $Repo '.github/gh-workflows.json'
+  if ((Test-Path -LiteralPath $adoptCfg) -and -not $Force) { throw "$adoptCfg already exists (already adopted). Use -Force to re-infer it." }
+  $wfDir = Join-Path $Repo '.github/workflows'
+  if (-not (Test-Path -LiteralPath $wfDir)) { throw "$wfDir does not exist: nothing to adopt." }
+  $headRef = if ($env:GHW_STUB_SHA) { $env:GHW_STUB_SHA } else { 'origin/main' }
+  if (-not $env:GHW_STUB_SHA) { Invoke-Git @('fetch', '-q', '--tags', 'origin') | Out-Null }
+  $headSha = (Invoke-Git @('rev-parse', '--verify', "$headRef^{commit}")).Trim()
+  $headStubs = Get-StubsAtSha -RepoRoot $src -Sha $headSha
+  $current = [ordered]@{}
+  foreach ($f in (Get-ChildItem -LiteralPath $wfDir -Filter *.yml -File | Sort-Object { $_.Name } -CaseSensitive)) {
+    if ($headStubs.ContainsKey($f.Name)) { $current[".github/workflows/$($f.Name)"] = $utf8.GetString([IO.File]::ReadAllBytes($f.FullName)) }
+  }
+  if ($current.Count -eq 0) { throw "No gh-workflows stubs found in $wfDir." }
+  $inferred = Get-InferredStubConfig -WorkflowsDir $wfDir -StubNames ([string[]]@($headStubs.Keys)) -Templates $headStubs
+  $match = Find-StubRenderMatch -RepoRoot $src -Config $inferred -CurrentFiles $current -HeadRef $headSha
+  $adoptTags = [string[]]@((Invoke-Git @('tag', '-l')) | Where-Object { $_ })
+  Test-StubConfig -Config $match.Config -StubNames ([string[]]@($headStubs.Keys)) -Tags $adoptTags
+
+  # Matched: the lock holds the current hashes. Not matched: the RENDERED hash for every differing
+  # path (so sync sees the file as modified), the current hash elsewhere.
+  $adoptLock = [ordered]@{}
+  foreach ($k in $current.Keys) {
+    $adoptLock[$k] = if (-not $match.Matched -and $match.Differences -ccontains $k -and $match.Rendered.Contains($k)) { Get-TextSha256 $match.Rendered[$k] } else { Get-TextSha256 $current[$k] }
+  }
+  foreach ($k in $match.Differences) { if (-not $adoptLock.Contains($k) -and $match.Rendered.Contains($k)) { $adoptLock[$k] = Get-TextSha256 $match.Rendered[$k] } }
+
+  Write-Lf $adoptCfg (ConvertTo-StubConfigJson $match.Config)
+  Write-Lf (Join-Path $Repo '.github/gh-workflows.lock') (New-StubLock -Sha $match.Sha -Files $adoptLock)
+  Write-Host "Adopted : .github/gh-workflows.json, .github/gh-workflows.lock (no stub written)"
+  if ($match.Matched) { Write-Host "Match   : stubs are byte-identical to a render at $($match.Sha)" }
+  else {
+    Write-Host "Match   : none; lock sha = $($match.Sha) (head). Differences from a render at head:"
+    foreach ($d in $match.Differences) { Write-Host "  $d" }
+    Write-Host "  (the lock holds the rendered hash for these, so sync will update them)"
+  }
+  Write-Host ""
+  Write-Host "Next    : on a chore/ branch commit .github/gh-workflows.json and .github/gh-workflows.lock, open the PR,"
+  Write-Host "          and merge it by hand (the gate refuses PRs that touch these files)."
+  return
+}
+
+New-Item -ItemType Directory -Force -Path (Join-Path $dst 'workflows') | Out-Null
 
 # An existing .github/gh-workflows.json is the base config; only parameters passed explicitly override it.
 $cfgPath = Join-Path $dst 'gh-workflows.json'
