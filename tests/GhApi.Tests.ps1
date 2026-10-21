@@ -52,6 +52,7 @@ Describe 'Get-SyncRepoList' {
     It 'keeps non-archived repos with a config and skips 404' {
         Mock Invoke-GhApi -ModuleName GhApi {
             switch -Regex ($Path) {
+                '^user$' { [pscustomobject]@{ login = 'octo-self' } }
                 '^users/octo-org$' { [pscustomobject]@{ type = 'Organization' } }
                 '^orgs/octo-org/repos' {
                     @(
@@ -72,7 +73,8 @@ Describe 'Get-SyncRepoList' {
     }
     It 'uses users/<o>/repos for a user owner' {
         Mock Invoke-GhApi -ModuleName GhApi {
-            if ($Path -eq 'users/octo-user') { [pscustomobject]@{ type = 'User' } } else { @() }
+            if ($Path -eq 'user') { [pscustomobject]@{ login = 'octo-self' } }
+            elseif ($Path -eq 'users/octo-user') { [pscustomobject]@{ type = 'User' } } else { @() }
         }
         $null = Get-SyncRepoList -Owners 'octo-user'
         Should -Invoke Invoke-GhApi -ModuleName GhApi -ParameterFilter { $Path -like 'users/octo-user/repos*' }
@@ -80,12 +82,33 @@ Describe 'Get-SyncRepoList' {
     It 'throws on a non-404 error' {
         Mock Invoke-GhApi -ModuleName GhApi {
             switch -Regex ($Path) {
+                '^user$' { [pscustomobject]@{ login = 'octo-self' } }
                 '^users/' { [pscustomobject]@{ type = 'User' } }
                 '/repos' { @([pscustomobject]@{ full_name = 'octo-user/demo'; default_branch = 'main'; archived = $false }) }
                 default { throw [GhApiException]::new('boom (HTTP 500)', 500) }
             }
         }
         { Get-SyncRepoList -Owners 'octo-user' } | Should -Throw
+    }
+}
+
+Describe 'Get-SyncRepoList self owner' {
+    It 'lists private repos via user/repos?affiliation=owner and still filters archived' {
+        Mock Invoke-GhApi -ModuleName GhApi {
+            switch -Regex ($Path) {
+                '^user$' { [pscustomobject]@{ login = 'Octo-Self' } }
+                '^user/repos\?affiliation=owner' {
+                    @([pscustomobject]@{ full_name = 'octo-self/priv'; default_branch = 'main'; archived = $false },
+                        [pscustomobject]@{ full_name = 'octo-self/arch'; default_branch = 'main'; archived = $true })
+                }
+                'contents' { Content '{}' }
+                default { throw "unexpected $Path" }
+            }
+        }
+        $l = @(Get-SyncRepoList -Owners 'octo-self')
+        $l.Count | Should -Be 1
+        $l[0].FullName | Should -Be 'octo-self/priv'
+        Should -Not -Invoke Invoke-GhApi -ModuleName GhApi -ParameterFilter { $Path -like 'users/*' }
     }
 }
 
@@ -226,13 +249,14 @@ Describe 'Set-SyncPr' {
         $patch.Body.ContainsKey('state') | Should -BeFalse
         $patch.Body.title | Should -Be 't'
     }
-    It 'reopens a closed unmerged PR' {
+    It 'never reopens: a closed unmerged PR gets a new PR' {
         Mock Invoke-GhApi -ModuleName GhApi {
             $script:calls.Add([pscustomobject]@{ Method = $Method; Path = $Path; Body = $Body })
-            if ($Method -eq 'GET') { @([pscustomobject]@{ number = 5; state = 'closed'; merged_at = $null }) } else { [pscustomobject]@{} }
+            if ($Method -eq 'GET') { @([pscustomobject]@{ number = 5; state = 'closed'; merged_at = $null }) } else { [pscustomobject]@{ number = 8 } }
         }
-        Set-SyncPr -Repo 'octo-org/demo' -Base main -Title 't' -Body 'b' | Should -Be 5
-        ($script:calls | Where-Object { $_.Method -eq 'PATCH' }).Body.state | Should -Be 'open'
+        Set-SyncPr -Repo 'octo-org/demo' -Base main -Title 't' -Body 'b' | Should -Be 8
+        $script:calls | Where-Object { $_.Method -eq 'PATCH' } | Should -BeNullOrEmpty
+        ($script:calls | Where-Object { $_.Method -eq 'POST' }).Path | Should -Be 'repos/octo-org/demo/pulls'
     }
     It 'creates a new PR when the newest one was merged' {
         Mock Invoke-GhApi -ModuleName GhApi {
@@ -270,6 +294,14 @@ Describe 'Get-CiState' {
         $s = Get-CiState -Repo 'octo-org/demo' -Sha 'abc'
         $s.BranchName | Should -Be 'success'
         $s.Verify | Should -Be 'pending'
+    }
+    It 'picks the newest run by id: a queued re-run with null started_at wins' {
+        Mock Invoke-GhApi -ModuleName GhApi {
+            [pscustomobject]@{ check_runs = @(
+                    [pscustomobject]@{ id = 10; name = 'ci / verify'; status = 'completed'; conclusion = 'success'; started_at = '2026-10-21T10:00:00Z' },
+                    [pscustomobject]@{ id = 11; name = 'ci / verify'; status = 'queued'; conclusion = $null; started_at = $null }) }
+        }
+        (Get-CiState -Repo 'octo-org/demo' -Sha 'abc').Verify | Should -Be 'pending'
     }
     It 'reports absent as missing and cancelled as failure' {
         Mock Invoke-GhApi -ModuleName GhApi {
@@ -337,5 +369,19 @@ Describe 'Invoke-GhApi error mapping' {
         $r = @(Invoke-GhApi -Method GET -Path 'x' -Paginate)
         $r.Count | Should -Be 3
         Should -Invoke Invoke-GhProcess -ModuleName GhApi -ParameterFilter { $Arguments -contains '--paginate' -and $Arguments -contains '--slurp' }
+    }
+    It 'single-page object response arrives as a one-element page list' {
+        Mock Invoke-GhProcess -ModuleName GhApi { [pscustomobject]@{ ExitCode = 0; Stdout = '[{"total_count":1,"check_runs":[{"id":1,"name":"ci / verify","status":"completed","conclusion":"success","started_at":"a"}]}]'; Stderr = '' } }
+        $r = @(Invoke-GhApi -Method GET -Path 'x' -Paginate)
+        $r.Count | Should -Be 1
+        $r[0].total_count | Should -Be 1
+        $r[0].check_runs[0].name | Should -Be 'ci / verify'
+        (Get-CiState -Repo 'octo-org/demo' -Sha 'abc').Verify | Should -Be 'success'
+    }
+    It 'single-page array response flattens to its items' {
+        Mock Invoke-GhProcess -ModuleName GhApi { [pscustomobject]@{ ExitCode = 0; Stdout = '[[{"name":"a"}]]'; Stderr = '' } }
+        $r = @(Invoke-GhApi -Method GET -Path 'x' -Paginate)
+        $r.Count | Should -Be 1
+        $r[0].name | Should -Be 'a'
     }
 }

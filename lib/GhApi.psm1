@@ -94,7 +94,7 @@ function Get-StatusOf($Exception) { if ($Exception -is [GhApiException]) { $Exce
 function ConvertFrom-GhContent($Item) {
     $b64 = ([string]$Item.content) -replace '\s', ''
     $bytes = [Convert]::FromBase64String($b64)
-    [Text.UTF8Encoding]::new($false).GetString($bytes)   # no EOL normalisation, CR preserved
+    [Text.UTF8Encoding]::new($false).GetString($bytes)   # no EOL normalisation, CR preserved; invalid bytes become U+FFFD (reads as drift, intended)
 }
 
 function Get-RepoFiles {
@@ -117,10 +117,16 @@ function Get-RepoFiles {
 function Get-SyncRepoList {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string[]]$Owners)
+    $login = (Invoke-GhApi -Method GET -Path 'user').login
     $found = foreach ($owner in $Owners) {
-        $u = Invoke-GhApi -Method GET -Path "users/$owner"
-        $base = if ($u.type -eq 'Organization') { "orgs/$owner/repos" } else { "users/$owner/repos" }
-        $repos = @(Invoke-GhApi -Method GET -Path "${base}?per_page=100" -Paginate)
+        # users/<o>/repos lists PUBLIC repos only, even for the logged-in user; user/repos sees private ones.
+        if ($login -and $owner -ieq $login) {
+            $path = 'user/repos?affiliation=owner&per_page=100'
+        } else {
+            $u = Invoke-GhApi -Method GET -Path "users/$owner"
+            $path = if ($u.type -eq 'Organization') { "orgs/$owner/repos?per_page=100" } else { "users/$owner/repos?per_page=100" }
+        }
+        $repos = @(Invoke-GhApi -Method GET -Path $path -Paginate)
         foreach ($r in $repos) {
             if ($r.archived) { continue }
             $files = Get-RepoFiles -Repo $r.full_name -Ref $r.default_branch -Paths @($script:ConfigPath)
@@ -245,10 +251,7 @@ function Set-SyncPr {
         $null = Invoke-GhApi -Method PATCH -Path "repos/$Repo/pulls/$($pr.number)" -Body @{ title = $Title; body = $Body }
         return [int]$pr.number
     }
-    if ($pr -and $pr.state -eq 'closed' -and $null -eq $pr.merged_at) {
-        $null = Invoke-GhApi -Method PATCH -Path "repos/$Repo/pulls/$($pr.number)" -Body @{ state = 'open'; title = $Title; body = $Body }
-        return [int]$pr.number
-    }
+    # Never reopen: the force-pushed branch is not a descendant of a closed PR's head (422); open a new PR.
     $new = Invoke-GhApi -Method POST -Path "repos/$Repo/pulls" -Body @{ title = $Title; body = $Body; head = $script:SyncBranch; base = $Base }
     [int]$new.number
 }
@@ -269,7 +272,7 @@ function Get-CiState {
         param($name)
         $mine = @($runs | Where-Object { $_.name -eq $name })
         if ($mine.Count -eq 0) { return 'missing' }
-        $latest = $mine | Sort-Object @{ Expression = { [string]$_.started_at }; Descending = $true }, @{ Expression = { [long]$_.id }; Descending = $true } | Select-Object -First 1
+        $latest = $mine | Sort-Object @{ Expression = { [long]$_.id }; Descending = $true } | Select-Object -First 1   # ids are monotonic; queued re-runs have null started_at
         if ($latest.status -ne 'completed') { return 'pending' }
         switch ($latest.conclusion) {
             'success' { 'success' }
