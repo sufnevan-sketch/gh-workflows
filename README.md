@@ -11,7 +11,7 @@ Each repo keeps only thin stubs under `.github/workflows/` that call the workflo
 | `.github/workflows/ci.yml` | reusable: `branch-name` (enforces `<type>/<short-description>`) + `verify` (optional toolchain, then the repo's one verify command) |
 | `.github/workflows/claude-review.yml` | reusable: Claude reviews, posts inline findings, submits `AUTO-REVIEW: PASS` or `CHANGES REQUESTED`; a gate step turns that into the job's exit code |
 | `.github/workflows/codex-review.yml` | reusable: Codex second review on `feat/ fix/ refactor/ perf/ build/` branches or PRs labeled `codex-review` / `risk:high`. Default `mode: cloud` = Codex cloud code review from the ChatGPT plan (the job comments `@codex review` and exits; when the bot answers, `codex-route.yml` dispatches the verdict run, red on any P0/P1 finding; `wait: true` is the old one-runner polling). A docs-only diff passes without asking Codex unless labeled. `mode: action` = `openai/codex-action@v1` with an API key. Either way: `CODEX-REVIEW: PASS` or `CHANGES REQUESTED`, red/green |
-| `.github/workflows/auto-merge.yml` | reusable: squash-merges when every check on the head SHA is green, required checks present, Codex present where the branch rule applies; outputs the PRs it merged |
+| `.github/workflows/auto-merge.yml` | reusable: squash-merges when every check on the head SHA is green, required checks present, Codex present where the branch rule applies; refuses (human merge) any PR touching `.github/workflows/**`, `.github/gh-workflows.json` or `.github/gh-workflows.lock`; outputs the PRs it merged |
 | `.github/workflows/review-ledger.yml` | reusable: after a merge, files the PR's non-blocking findings (Codex P2/P3, Claude MEDIUM/LOW) as one `review-ledger` issue. Called by the auto-merge stub's `ledger` job |
 | `.github/workflows/ledger-expiry.yml` | reusable, **not wired into the stub** (expiry is off): daily, would mark `review-ledger` issues `stale` at 14 days and close them as not planned at 30 (`actions/stale`). Called by the auto-merge stub's `expiry` job |
 | `.github/workflows/ledger-fix.yml` | reusable, opt-in: label a `review-ledger` issue `auto-fix` and Claude opens one small PR per finding (`fix/ledger-<n>-<k>`, `Refs #<n> (ledger items <k>)`; same-file findings share one), at most `max-prs` (5) per run; needs `AUTOFIX_PAT` |
@@ -194,7 +194,7 @@ Why `workflow_run` and not `check_suite` for the gate: GitHub does not fire `che
 Open it ready (never draft) and move on: CI reviews, `auto-fix.yml` fixes, the gate merges, the ledger keeps what is left. Start independent work in a new worktree from `origin/main`; work that needs the open PR branches from its head (a stacked PR) or waits for the merge. Look at a PR only when something asks for a human:
 
 - `🤖 auto-fix stopped after 3 rounds` comment: the reviews are still red; fix by hand or close.
-- `BLOCKED` title, a change under `.github/workflows/**`, or a fork PR: merge by hand.
+- `BLOCKED` title, a change under `.github/workflows/**` or to `.github/gh-workflows.json` / `.github/gh-workflows.lock`, or a fork PR: merge by hand.
 - The gate did not merge: read the `gate / auto-merge` run log (every skip is `#<n>: <reason>, skip`); `gh workflow run auto-merge` re-evaluates every open PR.
 
 ```bash
@@ -215,7 +215,7 @@ gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$
 - `BLOCKED` at the start of the PR title or body: the gate skips it; merge by hand. Reserved for changes that cannot be undone after merge (the PR template's "How to undo" line says so).
 - Draft PRs: not reviewed, not merged, until marked ready. Open PRs ready; the fix window, not a draft, is the time to fix non-blocking findings.
 - Fix window: up to `fix-window-minutes` after the last check while non-blocking bot threads are open (see above).
-- Any PR that changes `.github/workflows/**`: human merge.
+- Any PR that changes `.github/workflows/**`, `.github/gh-workflows.json` or `.github/gh-workflows.lock`: human merge.
 - Head branch under `skip-branch-prefixes` (`wo/`): the solo-harness `ship.ps1` waits on the same checks and merges these itself; the gate stays out to avoid a double-merge race.
 - A human `CHANGES_REQUESTED` review blocks until that reviewer approves or dismisses.
 - Kill switch: delete the repo's `auto-merge.yml` stub.

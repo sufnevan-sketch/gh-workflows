@@ -179,7 +179,7 @@ jobs:
 
               // --- Safety rail: never auto-merge a PR that edits the CI/gate itself ---
               const files = await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: number, per_page: 100 });
-              if (files.some(f => f.filename.startsWith(".github/workflows/"))) return no("touches .github/workflows/**, human merge required");
+              if (files.some(f => f.filename.startsWith(".github/workflows/") || f.filename === ".github/gh-workflows.json" || f.filename === ".github/gh-workflows.lock")) return no("touches .github/workflows/** or gh-workflows config/lock, human merge required");
 
               // --- Review gate: no outstanding CHANGES_REQUESTED (latest state per reviewer) ---
               const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: number, per_page: 100 });
