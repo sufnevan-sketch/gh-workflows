@@ -22,3 +22,5 @@ jobs:
     uses: ./.github/workflows/codex-route.yml
     with:
       codex-workflow: self-review.yml
+    secrets:
+      DISPATCH_TOKEN: ${{ secrets.CODEX_TRIGGER_PAT }}
