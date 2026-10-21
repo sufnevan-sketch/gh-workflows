@@ -59,3 +59,15 @@ jobs:
                       print(f, 'node --check:', 'OK' if r.returncode == 0 else r.stderr[:400]); bad |= r.returncode != 0
           sys.exit(bad)
           PY
+
+  pester:
+    name: pester
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # adoption tests render stubs at older SHAs
+      - name: Pester
+        shell: pwsh
+        run: Invoke-Pester tests -CI -Output Detailed
