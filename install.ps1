@@ -42,7 +42,8 @@ foreach ($s in $stubs) {
   $txt = $txt -replace '@main\b', "@$Ref"
   # The fix window is auto-fix.yml's time for its non-blocking pass; with no
   # auto-fix stub nothing acts in it, so it would only delay merges.
-  if ($s -eq 'auto-merge.yml' -and -not $WithAutoFix) { $txt = $txt -replace 'fix-window-minutes: \d+', 'fix-window-minutes: 0' }
+  $hasAutoFix = $WithAutoFix -or (Test-Path -LiteralPath (Join-Path $dst 'workflows/auto-fix.yml'))
+  if ($s -eq 'auto-merge.yml' -and -not $hasAutoFix) { $txt = $txt -replace 'fix-window-minutes: \d+', 'fix-window-minutes: 0' }
   if ($s -eq 'ci.yml') {
     $txt = $txt.Replace('__SETUP__', $Setup).Replace('__VERIFY__', $Verify)
     if ($WorkingDirectory) { $txt = $txt -replace '(?m)^\s*# working-directory: web.*$', "      working-directory: $WorkingDirectory" }

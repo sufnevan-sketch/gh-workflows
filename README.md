@@ -16,7 +16,7 @@ Each repo keeps only thin stubs under `.github/workflows/` that call the workflo
 | `.github/workflows/ledger-expiry.yml` | reusable: daily, marks `review-ledger` issues `stale` at 14 days and closes them as not planned at 30 (`actions/stale`). Called by the auto-merge stub's `expiry` job |
 | `.github/workflows/ledger-fix.yml` | reusable, opt-in: label a `review-ledger` issue `auto-fix` and Claude opens a `fix/ledger-<n>` PR with `Closes #<n>`; needs `AUTOFIX_PAT` |
 | `.github/workflows/claude.yml` | reusable: `@claude` mention handler |
-| `.github/workflows/auto-fix.yml` | reusable, opt-in (`-WithAutoFix`): CI fixes review findings so the session that opened the PR can move on. Red review: fixes blocking findings, max 3 rounds. Green with open non-blocking threads: one pass (fix / drop / defer) inside the gate's fix window. Needs `AUTOFIX_PAT` |
+| `.github/workflows/auto-fix.yml` | reusable, opt-in (`-WithAutoFix`): CI fixes review findings so the session that opened the PR can move on. Red review (with a CHANGES REQUESTED verdict) or red `ci / *`: fixes, max 3 rounds. Green with open non-blocking threads: one pass (fix / drop / defer) inside the gate's fix window. Needs `AUTOFIX_PAT` |
 | `.github/workflows/self-check.yml` | this repo's CI: actionlint on workflows and stubs, stub references resolve, script bodies parse |
 | `.github/workflows/self-review.yml` | this repo dogfoods `claude-review` + `codex-review` on its own PRs |
 | `.github/workflows/self-gate.yml` | this repo's own gate: merges green PRs that touch nothing under `.github/workflows/**` |
@@ -43,7 +43,7 @@ pwsh set-secrets.ps1 -Repo <owner>/<repo>            # -Names CLAUDE_CODE_OAUTH_
 gh secret list --repo <owner>/<repo>
 ```
 
-   `CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token` (interactive, run it yourself). Do not run `gh secret set` interactively from a non-TTY tool: it stores an empty value silently.
+   `CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token` (interactive, run it yourself). A fine-grained PAT covers one owner, so `AUTOFIX_PAT` usually differs per owner: the helper reads `AUTOFIX_PAT_<OWNER>` (owner upper-cased, `-` -> `_`, e.g. `AUTOFIX_PAT_SUFNEVAN_SKETCH`) before plain `AUTOFIX_PAT`, and still sets the repo secret as `AUTOFIX_PAT`; an empty owner line is reported missing, never replaced by another owner's token. Do not run `gh secret set` interactively from a non-TTY tool: it stores an empty value silently.
 3. The **Claude Code GitHub App** must cover the repo, or `claude / claude-review` fails after ~30s with `Claude Code is not installed on this repository`. The OAuth token authenticates you; the App is what grants the action a token for THIS repo, and the two are independent. An install scoped to "selected repositories" silently excludes every new repo. Check it before the PR:
 
    ```bash

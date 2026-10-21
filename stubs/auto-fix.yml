@@ -6,7 +6,7 @@ name: auto-fix
 
 on:
   workflow_run:
-    workflows: ["Claude Code Review", "Codex Review"]
+    workflows: ["CI", "Claude Code Review", "Codex Review"]
     types: [completed]
 
 permissions:

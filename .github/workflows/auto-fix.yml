@@ -2,21 +2,29 @@
 # that opened a PR can move on. Check name: "fix / auto-fix". Two modes, chosen
 # per run by the `decide` step:
 #
-#   blocking     A review went red (Claude CHANGES REQUESTED, or Codex P0/P1).
-#                Fix every CRITICAL/HIGH and P0/P1, push with `[auto-fix]`.
-#                Bounded: stops after `max-iterations` such commits and asks a human.
+#   blocking     A review is red with a CHANGES REQUESTED verdict on the head
+#                (Claude CRITICAL/HIGH, Codex P0/P1), and/or `ci / *` is red (a
+#                fix broke verify). Fix, push with `[auto-fix]`. Bounded: stops
+#                after `max-iterations` such commits and asks a human. A red
+#                review with no verdict (infra failure) is left to a human.
+#                The mode comes from the head's live check state, not from the
+#                event that woke the run (one pending run per concurrency group).
 #   nonblocking  Every check on the head is green, but non-blocking bot threads
 #                (Codex P2/P3, Claude MEDIUM/LOW) are open: the gate's fix window
 #                (auto-merge.yml) is holding the PR. ONE pass per PR: per thread
 #                fix (push with `[review-fix]`), drop (reply + resolve) or defer
-#                (leave it; it goes to the review ledger). After a `[review-fix]`
-#                commit exists, neither this nor the gate's window runs again.
+#                (leave it; it goes to the review ledger). Claimed by a marker
+#                comment before it starts; after a `[review-fix]` commit the
+#                gate's window does not hold the PR again.
+#
+# Never: BLOCKED (title or body), `skip-branch-prefixes` (wo/), PRs that touch
+# .github/workflows/ (human merge), forks, drafts.
 #
 # Every push re-runs CI and both reviews, and only the gate merges: CI fixes are
 # held to the same bar as any other change.
 #
-# Triggered by the stub on `workflow_run` of "Claude Code Review" and "Codex
-# Review" (success or failure). Requires AUTOFIX_PAT (fine-grained PAT, Contents
+# Triggered by the stub on `workflow_run` of "CI", "Claude Code Review" and
+# "Codex Review" (success or failure). Requires AUTOFIX_PAT (fine-grained PAT, Contents
 # + Pull requests + Issues + Workflows read/write on the calling repo):
 # GITHUB_TOKEN cannot be used, because a push made with it does not re-trigger
 # CI or the reviews. With the secret unset every step is skipped.
@@ -38,6 +46,23 @@ on:
         description: "Head-branch prefixes that get no non-blocking pass (same as the gate's fix-window skip list)"
         type: string
         default: "fix/ledger-"
+      skip-branch-prefixes:
+        description: "Head-branch prefixes auto-fix never touches (same as the gate's: wo/ is merged by ship.ps1)"
+        type: string
+        default: "wo/"
+      required-checks:
+        description: "Same as auto-merge.yml: the non-blocking pass waits until these are green"
+        type: string
+        default: "ci / verify,claude / claude-review"
+      codex-check:
+        type: string
+        default: "codex / codex-review"
+      codex-branch-prefixes:
+        type: string
+        default: "feat/,fix/,refactor/,perf/,build/"
+      codex-labels:
+        type: string
+        default: "codex-review,risk:high"
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -68,51 +93,85 @@ jobs:
         env:
           REVIEW_BOTS: ${{ inputs.review-bots }}
           NB_SKIP_PREFIXES: ${{ inputs.nonblocking-skip-prefixes }}
+          SKIP_BRANCH_PREFIXES: ${{ inputs.skip-branch-prefixes }}
+          REQUIRED_CHECKS: ${{ inputs.required-checks }}
+          CODEX_CHECK: ${{ inputs.codex-check }}
+          CODEX_BRANCH_PREFIXES: ${{ inputs.codex-branch-prefixes }}
+          CODEX_LABELS: ${{ inputs.codex-labels }}
         with:
           script: |
             const { owner, repo } = context.repo;
             const run = context.payload.workflow_run;
             const list = v => (v || "").split(",").map(s => s.trim()).filter(Boolean);
             const BOTS = new Set(list(process.env.REVIEW_BOTS));
+            const SKIP = list(process.env.SKIP_BRANCH_PREFIXES);
             const NB_SKIP = list(process.env.NB_SKIP_PREFIXES);
+            const REQUIRED = list(process.env.REQUIRED_CHECKS);
+            const CODEX_PREFIXES = list(process.env.CODEX_BRANCH_PREFIXES);
+            const CODEX_LABELS = list(process.env.CODEX_LABELS);
+            const NB_MARK = "<!-- auto-fix:nonblocking -->";
             const done = msg => core.info(msg);
 
             const open = await github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 });
             const pr = open.find(p => p.head.sha === run.head_sha && p.head.repo && p.head.repo.full_name === `${owner}/${repo}` && !p.draft);
             if (!pr) return done(`no open same-repo PR at ${run.head_sha.slice(0, 7)}; nothing to fix`);
             const tag = `#${pr.number}`;
-            const out = mode => {
+            const out = (mode, why) => {
               core.setOutput("number", String(pr.number));
               core.setOutput("head", pr.head.ref);
               core.setOutput("base", pr.base.ref);
               core.setOutput("mode", mode);
-              core.notice(`${tag}: auto-fix ${mode} (after ${run.name} ${run.conclusion} on ${run.head_sha.slice(0, 7)})`);
+              core.setOutput("why", why);
+              core.notice(`${tag}: auto-fix ${mode} on ${run.head_sha.slice(0, 7)} (${why})`);
             };
-            if ((pr.title || "").trimStart().startsWith("BLOCKED")) return done(`${tag}: BLOCKED, left to a human`);
-            if (run.conclusion === "failure") return out("blocking");
-
-            // --- Non-blocking pass: only once every check on the head is green ---
-            if (NB_SKIP.some(p => pr.head.ref.startsWith(p))) return done(`${tag}: ${pr.head.ref} gets no non-blocking pass`);
+            const blocked = (pr.title || "").trimStart().startsWith("BLOCKED") || (pr.body || "").trimStart().startsWith("BLOCKED");
+            if (blocked) return done(`${tag}: BLOCKED, left to a human`);
+            if (SKIP.some(p => pr.head.ref.startsWith(p))) return done(`${tag}: ${pr.head.ref} is merged by its own tooling`);
             const files = await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: pr.number, per_page: 100 });
-            if (files.some(f => f.filename.startsWith(".github/workflows/"))) return done(`${tag}: touches .github/workflows/**, human merge, no pass`);
-            const commits = await github.paginate(github.rest.pulls.listCommits, { owner, repo, pull_number: pr.number, per_page: 100 });
-            if (commits.some(c => (c.commit.message || "").includes("[review-fix]"))) return done(`${tag}: non-blocking pass already done ([review-fix] commit)`);
+            if (files.some(f => f.filename.startsWith(".github/workflows/"))) return done(`${tag}: touches .github/workflows/**, human merge, no auto-fix`);
 
+            // --- Live state of the head, not the event that woke this run: GitHub keeps one
+            // pending run per concurrency group, so the triggering completion may not be the
+            // only one that happened. ---
             const checkRuns = await github.paginate(github.rest.checks.listForRef, { owner, repo, ref: run.head_sha, per_page: 100 });
             const newest = new Map();
-            // This job, the gate and its siblings are not part of "the reviews are done".
             for (const c of checkRuns.filter(c => !/(auto-fix|auto-merge|review-ledger|ledger-expiry)$/.test(c.name))) {
               const prev = newest.get(c.name);
               const t = x => new Date(x.started_at || 0).getTime();
               if (!prev || t(c) > t(prev) || (t(c) === t(prev) && c.id > prev.id)) newest.set(c.name, c);
             }
             const runs = [...newest.values()];
-            const notDone = runs.filter(c => c.status !== "completed").map(c => c.name);
-            const notGreen = runs.filter(c => c.status === "completed" && !["success", "neutral", "skipped"].includes(c.conclusion)).map(c => c.name);
-            if (notDone.length || notGreen.length) return done(`${tag}: waiting (pending: [${notDone}] not green: [${notGreen}]); a later completion re-runs this`);
+            const pending = runs.filter(c => c.status !== "completed").map(c => c.name);
+            const red = runs.filter(c => c.status === "completed" && !["success", "neutral", "skipped"].includes(c.conclusion)).map(c => c.name);
 
-            // Same severity reading as auto-merge.yml and review-ledger.yml.
-            const BLOCKING = new Set(["CRITICAL", "HIGH", "P0", "P1"]);
+            // A red review counts only with a CHANGES REQUESTED verdict on this head; a review
+            // that failed for infrastructure reasons is not something a fix can address.
+            const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: pr.number, per_page: 100 });
+            const changesRequested = reviews.some(r => r.commit_id === run.head_sha && r.user && BOTS.has(r.user.login) &&
+              /^(AUTO|CODEX)-REVIEW: CHANGES REQUESTED/.test((r.body || "").trimStart()));
+            const redReviews = red.filter(n => /(claude-review|codex-review)$/.test(n));
+            const redCi = red.filter(n => /^ci \//.test(n));
+            const why = [];
+            if (redReviews.length && changesRequested) why.push(`review: ${redReviews.join(", ")}`);
+            if (redCi.length) why.push(`ci: ${redCi.join(", ")}`);
+            if (why.length) return out("blocking", why.join("; "));
+            if (red.length) return done(`${tag}: red without a fixable cause (${red.join(", ")}; no CHANGES REQUESTED verdict on this head), left to a human`);
+
+            // --- Non-blocking pass: every required check green, once per PR ---
+            if (pending.length) return done(`${tag}: waiting on [${pending}]; a later completion re-runs this`);
+            const labels = (pr.labels || []).map(l => l.name);
+            const codexApplies = CODEX_PREFIXES.some(p => pr.head.ref.startsWith(p)) || CODEX_LABELS.some(l => labels.includes(l));
+            const required = codexApplies ? [...REQUIRED, process.env.CODEX_CHECK] : REQUIRED;
+            const missing = required.filter(n => !runs.some(c => c.name === n && c.conclusion === "success"));
+            if (missing.length) return done(`${tag}: required checks not green yet [${missing}]`);
+            if (NB_SKIP.some(p => pr.head.ref.startsWith(p))) return done(`${tag}: ${pr.head.ref} gets no non-blocking pass`);
+            const commits = await github.paginate(github.rest.pulls.listCommits, { owner, repo, pull_number: pr.number, per_page: 100 });
+            if (commits.some(c => ((c.commit && c.commit.message) || "").includes("[review-fix]"))) return done(`${tag}: non-blocking pass already done ([review-fix] commit)`);
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: pr.number, per_page: 100 });
+            if (comments.some(c => c.user && c.user.login === "github-actions[bot]" && (c.body || "").includes(NB_MARK))) return done(`${tag}: non-blocking pass already made (marker comment)`);
+
+            // Exactly the threads the pass acts on, and the gate's window waits on.
+            const NB = new Set(["MEDIUM", "LOW", "P2", "P3"]);
             const sevOf = t => {
               const badge = t.match(/!\[(P[0-3]) Badge\]/);
               if (badge) return badge[1];
@@ -138,19 +197,24 @@ jobs:
                 if (!c || t.isResolved || t.isOutdated) continue;
                 const login = c.author ? c.author.login : "";
                 if (!BOTS.has(login) && !BOTS.has(`${login}[bot]`)) continue;
-                if (!BLOCKING.has(sevOf(c.body))) openNb++;
+                if (NB.has(sevOf(c.body))) openNb++;
               }
               cursor = threads.pageInfo.hasNextPage ? threads.pageInfo.endCursor : null;
             } while (cursor);
             if (!openNb) return done(`${tag}: green, no open non-blocking threads; the gate merges`);
-            return out("nonblocking");
+            // Claim the one pass before it runs, so a rerun or a queued sibling cannot start a second.
+            await github.rest.issues.createComment({ owner, repo, issue_number: pr.number,
+              body: `${NB_MARK}\n🤖 auto-fix: one pass over ${openNb} open non-blocking review thread(s) on ${run.head_sha.slice(0, 7)} (fix, drop or defer each).` });
+            return out("nonblocking", `${openNb} open non-blocking thread(s)`);
 
       - name: Checkout PR branch (PAT so the fix push re-triggers CI + review)
         if: steps.decide.outputs.mode != ''
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.AUTOFIX_PAT }}
-          ref: ${{ steps.decide.outputs.head }}
+          # The exact head decided on: if someone pushed since, the final push is
+          # non-fast-forward and fails safely instead of fixing unreviewed code.
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
       - name: Count prior blocking rounds
@@ -160,7 +224,7 @@ jobs:
           BASE_REF: ${{ steps.decide.outputs.base }}
         run: |
           git fetch origin "$BASE_REF" --depth=50 || true
-          n=$(git log --format='%s' "origin/${BASE_REF}..HEAD" | grep -c '\[auto-fix\]' || true)
+          n=$(git log --format='%B' "origin/${BASE_REF}..HEAD" | grep -c '\[auto-fix\]' || true)
           echo "count=${n:-0}" >> "$GITHUB_OUTPUT"
           if [ "${n:-0}" -ge "$MAX_ITER" ]; then echo "stop=true" >> "$GITHUB_OUTPUT"; else echo "stop=false" >> "$GITHUB_OUTPUT"; fi
           echo "auto-fix rounds so far: ${n:-0} (max $MAX_ITER)"
@@ -184,12 +248,12 @@ jobs:
           additional_permissions: |
             actions: read
           prompt: |
-            An automated reviewer turned PR #${{ steps.decide.outputs.number }} in ${{ github.repository }} red: Claude `AUTO-REVIEW: CHANGES REQUESTED` and/or a Codex P0/P1 finding (`CODEX-REVIEW: CHANGES REQUESTED`). You are checked out on its branch `${{ steps.decide.outputs.head }}`.
+            PR #${{ steps.decide.outputs.number }} in ${{ github.repository }} is red: ${{ steps.decide.outputs.why }}. A red review means Claude `AUTO-REVIEW: CHANGES REQUESTED` and/or a Codex P0/P1 finding (`CODEX-REVIEW: CHANGES REQUESTED`); a red `ci / ...` check means the verify command fails (read it with `gh run list --commit ${{ github.event.workflow_run.head_sha }} --workflow CI` and `gh run view <id> --log-failed`). You are checked out on the PR's head commit (detached); its branch is `${{ steps.decide.outputs.head }}`.
             1. Read the latest review bodies and all inline review comments:
                gh pr view ${{ steps.decide.outputs.number }} --comments
                gh api repos/${{ github.repository }}/pulls/${{ steps.decide.outputs.number }}/reviews
                gh api repos/${{ github.repository }}/pulls/${{ steps.decide.outputs.number }}/comments
-            2. Fix EVERY CRITICAL/HIGH (Claude) and P0/P1 (Codex) finding on the current head. Keep changes minimal and scoped strictly to the findings; do not refactor unrelated code. Leave MEDIUM/LOW and P2/P3 alone: they get their own pass once the reviews are green.
+            2. Fix EVERY CRITICAL/HIGH (Claude) and P0/P1 (Codex) finding on the current head, and whatever makes CI red. Never touch `.github/workflows/`. Keep changes minimal and scoped strictly to the findings; do not refactor unrelated code. Leave MEDIUM/LOW and P2/P3 alone: they get their own pass once the reviews are green.
             3. Run the repo's verify command (the `verify:` input in .github/workflows/ci.yml, usually `pwsh ./verify.ps1`; otherwise package.json scripts or pytest) and make it pass.
             4. Commit on the current branch with a message that INCLUDES the marker `[auto-fix]`, then `git push origin HEAD:${{ steps.decide.outputs.head }}` (do NOT open a new PR).
             If a finding is a false positive, reply to it explaining why instead of changing code, but still commit any real fixes.

@@ -209,7 +209,7 @@ jobs:
             };
 
             // Same severity reading as review-ledger.yml: Codex `![P2 Badge]`, Claude `path:line - MEDIUM:`.
-            const BLOCKING = new Set(["CRITICAL", "HIGH", "P0", "P1"]);
+            const NB = new Set(["MEDIUM", "LOW", "P2", "P3"]);
             const sevOf = t => {
               const badge = t.match(/!\[(P[0-3]) Badge\]/);
               if (badge) return badge[1];
@@ -239,7 +239,9 @@ jobs:
                   // GraphQL drops the `[bot]` suffix REST shows; match both forms.
                   const login = c.author ? c.author.login : "";
                   if (!BOTS.has(login) && !BOTS.has(`${login}[bot]`)) continue;
-                  if (BLOCKING.has(sevOf(c.body))) continue;
+                  // Only what auto-fix's pass acts on; an unrated or blocking thread
+                  // would hold the PR for the full window with nobody to handle it.
+                  if (!NB.has(sevOf(c.body))) continue;
                   open.push(t.path);
                 }
                 cursor = threads.pageInfo.hasNextPage ? threads.pageInfo.endCursor : null;
