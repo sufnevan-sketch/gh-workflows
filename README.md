@@ -97,11 +97,11 @@ Stubs pin `@main`, so a change to a reusable workflow reaches every repo at once
 - `gh-workflows.json`, the repo's choices. `ref` (`main` or an existing gh-workflows tag; default `main`), `setup`, `verify`, `working-directory`, `auto-fix` (bool), `stubs` (the stub set, for repos that deviate from the default, e.g. review-only), `merge` (`auto` or `manual`), `with` (per-stub inputs, keyed `<stub>.yml/<jobId>`, e.g. `{"auto-merge.yml/gate": {"delete-branch": false}}`), `secrets` (extra named secrets per stub job, e.g. `OPENAI_API_KEY` for codex `mode: action`), and `ledger-expiry` (bool). Every string is one line; unknown fields are an error, so the repo's sync fails rather than rendering half a config.
 - `gh-workflows.lock`, written only by tooling: the gh-workflows commit the stubs were rendered from and a sha256 per owned stub.
 
-The gate refuses any PR that touches either file, like a workflow file, so both change only by a hand merge or by the sync's own merge. A config change is a PR you merge; the sync PR that renders it afterwards merges itself.
+The gate refuses any PR that touches either file, like a workflow file, so both change only by a hand merge or by the sync's own merge. A config change is a PR you merge; the sync PR that renders it afterwards merges itself (today only if no `chore/gh-workflows-sync` branch is left over from an earlier sync merge: the sync does not delete it, and a leftover branch rendered with the old config reads as "changed by someone else").
 
 **Adoption.** A repo installed by the current `install.ps1` already has both files. A repo installed earlier has stubs but neither file: `pwsh install.ps1 -Repo <repo-root> -Adopt` infers the config from the installed stubs and writes the config and lock without changing a stub. Commit them on a `docs/` branch; the PR is a hand merge (the gate refuses it). A stub that does not match the render of the inferred config is locked at the rendered hash, so the first sync reports it as drift instead of overwriting it.
 
-**When a sync PR waits for you** (outcome `held`, reasons in the PR body under "Waits for a human merge because:"):
+**When a sync PR waits for you** (outcome `held`; the reason is on the repo's output line, and also in the PR body under "Waits for a human merge because:" when the sync opened or updated the PR):
 
 - `not adopted`: the repo has a config but no lock.
 - `drift: <stub> differs from lock` / `missing` / `exists but is not in lock`: a stub was edited by hand. There is no "keep my edit" path; make it a config field or drop it.
