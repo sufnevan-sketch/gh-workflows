@@ -21,7 +21,7 @@ BeforeAll {
     }
     function script:Get-Current([string]$Repo) {
         $h = [ordered]@{}
-        foreach ($f in (Get-ChildItem (Join-Path $Repo '.github/workflows') -Filter *.yml | Sort-Object Name)) {
+        foreach ($f in (Get-ChildItem (Join-Path $Repo '.github/workflows') -Filter *.yml | Where-Object { $script:HeadNames -contains $_.Name } | Sort-Object Name)) {
             $h[".github/workflows/$($f.Name)"] = $script:Utf8.GetString([IO.File]::ReadAllBytes($f.FullName))
         }
         $h
@@ -186,5 +186,94 @@ Describe 'adoption' {
         $res.Code | Should -Not -Be 0
         $res.Out | Should -Match 'already'
         (Invoke-InstallAdopt $repo @('-Force')).Code | Should -Be 0
+    }
+}
+
+Describe 'hand-edited stubs never crash adoption' {
+    It 'a renamed job id is a difference, not a crash or an extra secret' {
+        $repo = New-Fixture 'HEAD' (New-Cfg)
+        $cr = Join-Path $repo '.github/workflows/claude-review.yml'
+        $text = [IO.File]::ReadAllText($cr)
+        $text | Should -Match '(?m)^  claude:\s*$'
+        [IO.File]::WriteAllText($cr, ($text -replace '(?m)^  claude:\s*$', '  review:'), $script:Utf8)
+        $r = Invoke-Adopt $repo
+        $r.Match.Matched | Should -BeFalse
+        $r.Match.Differences | Should -Contain '.github/workflows/claude-review.yml'
+        $r.Inferred.secrets.Count | Should -Be 0
+        $r.Match.Config.secrets.Count | Should -Be 0
+    }
+
+    It 'an out-of-enum setup falls back to the default and the file is a difference' {
+        $repo = New-Fixture 'HEAD' (New-Cfg)
+        $ci = Join-Path $repo '.github/workflows/ci.yml'
+        $text = [IO.File]::ReadAllText($ci)
+        $text | Should -Match 'setup: none'
+        [IO.File]::WriteAllText($ci, ($text -replace 'setup: none', 'setup: node-yarn'), $script:Utf8)
+        $r = Invoke-Adopt $repo
+        $r.Inferred.setup | Should -Be 'none'
+        $r.Match.Matched | Should -BeFalse
+        $r.Match.Differences | Should -Contain '.github/workflows/ci.yml'
+        $res = Invoke-InstallAdopt $repo
+        $res.Code | Should -Be 0 -Because $res.Out
+    }
+}
+
+Describe 'adoption of installs made by the real old installers' {
+    BeforeAll {
+        # Runs the installer exactly as it was at $Sha, with the stubs of that commit.
+        function script:Install-AtSha([string]$Sha, [string[]]$More = @()) {
+            $inst = Join-Path $TestDrive ('oi-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Force (Join-Path $inst 'stubs') | Out-Null
+            [IO.File]::WriteAllText((Join-Path $inst 'install.ps1'), ((git -C $script:RepoRoot show "${Sha}:install.ps1") -join "`n") + "`n", $script:Utf8)
+            foreach ($n in (git -C $script:RepoRoot ls-tree --name-only $Sha stubs/)) {
+                $leaf = ($n -split '/')[-1]
+                [IO.File]::WriteAllText((Join-Path $inst "stubs/$leaf"), ((git -C $script:RepoRoot show "${Sha}:$n") -join "`n") + "`n", $script:Utf8)
+            }
+            $repo = Join-Path $TestDrive ('or-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory $repo | Out-Null
+            git -C $repo init -q
+            $null = & pwsh -NoProfile -File (Join-Path $inst 'install.ps1') -Repo $repo @More 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "old installer at $Sha failed" }
+            $repo
+        }
+    }
+
+    It '80d39c6 without auto-fix: no match, template defaults are not repo choices, new stubs are differences' {
+        $repo = Install-AtSha '80d39c6' @()
+        $r = Invoke-Adopt $repo
+        $r.Match.Matched | Should -BeFalse
+        $r.Match.Config.stubs | Should -BeNullOrEmpty
+        $r.Match.Config.'ledger-expiry' | Should -BeFalse
+        $r.Match.Config.with.Count | Should -Be 0
+        $r.Match.Config.'auto-fix' | Should -BeFalse
+        $r.Match.Differences | Should -Contain '.github/workflows/auto-merge.yml'
+        $r.Match.Differences | Should -Contain '.github/workflows/codex-route.yml'
+    }
+
+    It '698cd3a with auto-fix: era stub set is not pinned, codex-route appears with a lock entry' {
+        $repo = Install-AtSha '698cd3a' @('-WithAutoFix')
+        # Untouched, this install matches an older stub-only commit; one local edit forces the no-match path.
+        [IO.File]::AppendAllText((Join-Path $repo '.github/workflows/ci.yml'), "# local note`n", $script:Utf8)
+        $r = Invoke-Adopt $repo
+        $r.Match.Matched | Should -BeFalse
+        $r.Match.Config.stubs | Should -BeNullOrEmpty
+        $r.Match.Config.'auto-fix' | Should -BeTrue
+        $r.Match.Config.with.Count | Should -Be 0
+        $r.Match.Differences | Should -Contain '.github/workflows/codex-route.yml'
+        (Invoke-InstallAdopt $repo).Code | Should -Be 0
+        $lock = Read-StubLock ([IO.File]::ReadAllText((Join-Path $repo '.github/gh-workflows.lock')))
+        $lock.files.Keys | Should -Contain '.github/workflows/codex-route.yml'
+        (Test-Path (Join-Path $repo '.github/workflows/codex-route.yml')) | Should -BeFalse
+        $cfg = Get-Content (Join-Path $repo '.github/gh-workflows.json') -Raw | ConvertFrom-Json
+        $cfg.PSObject.Properties.Name | Should -Not -Contain 'stubs'
+    }
+
+    It 'b2e54fe default install matches that commit' {
+        $repo = Install-AtSha 'b2e54fe' @()
+        $r = Invoke-Adopt $repo
+        $r.Match.Matched | Should -BeTrue
+        # The newest commit with the same render wins, so it may be a later stub-only commit.
+        git -C $script:RepoRoot merge-base --is-ancestor b2e54fe $r.Match.Sha
+        $LASTEXITCODE | Should -Be 0
     }
 }
