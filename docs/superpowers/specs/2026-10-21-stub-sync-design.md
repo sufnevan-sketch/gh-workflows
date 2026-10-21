@@ -135,6 +135,6 @@ Trust: whoever can push to gh-workflows `main` already controls every installed 
 ## Verification
 
 - **Renderer**: for each installed repo, adopt in dry-run and confirm the render of its inferred config equals its current files, or that every difference is explained. Run locally, output kept out of this public repo.
-- **Sync, dry-run mode**: a `-WhatIf` input that lists, per repo, what it would push, delete and merge, and writes nothing. Run it against the real installation set before the first real run.
+- **Sync, dry-run mode**: a `-WhatIf` input that lists, per repo, what it would push, delete and merge, and writes nothing. Run it against the real repo set before the first real run.
 - **End to end**: on a throwaway private repo with the stubs installed and `ref` pinned to a test tag, move the tag to a commit with a changed stub, run the sync, and confirm: PR opened, CI green, merged. Then confirm each hold: a hand-edited stub (drift), an edited config (config changed), `merge: manual`, a foreign commit on the sync branch; each leaves the PR open with the right reason. Then remove a stub from the template and confirm it is deleted. Then a gh-workflows commit that changes no stub: confirm no PR. Then a config with a newline in `verify`: confirm the renderer rejects it.
 - **Privacy**: after a real run, read the public gh-workflows Actions logs for that period and confirm none of them was produced by the sync, and grep this repo for private owner names.
