@@ -1,6 +1,7 @@
 # Stub, OPT-IN (install.ps1 -WithAutoFix). Adding the `auto-fix` label to a
-# `review-ledger` issue makes Claude open a `fix/ledger-<n>` PR with
-# `Closes #<n>`, which then runs the normal review loop and gate.
+# `review-ledger` issue makes Claude open one small PR per finding
+# (`fix/ledger-<n>-<k>`, body `Refs #<n> (ledger items <k>)`), each running the
+# normal review loop and gate; the ledger ticks a box per merge and closes itself.
 # Needs the AUTOFIX_PAT secret; without it the job says so on the issue.
 name: ledger-fix
 
