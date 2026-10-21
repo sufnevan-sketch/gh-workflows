@@ -27,7 +27,8 @@
 #      comes first. One window per PR, recorded by a `<!-- fix-window:until=... -->`
 #      gate comment, so a fix push does not open a second one. Only a single-PR run
 #      sleeps; a drain logs the hold and moves on. BLOCKED during the window holds
-#      the PR past it.
+#      the PR past it. auto-fix.yml makes its one non-blocking pass in this window;
+#      after a `[review-fix]` commit the gate never holds the PR again.
 # The merge uses the caller's GITHUB_TOKEN (terminal action, nothing to cascade).
 # Output `merged-prs` lists what this run merged; the stub's `ledger` job hands it
 # to review-ledger.yml, because a GITHUB_TOKEN merge fires no `pull_request: closed`.
@@ -264,10 +265,15 @@ jobs:
 
               // --- Fix window ---
               let windowNote = "";
+              // One fix round per PR: once a `[review-fix]` commit exists (auto-fix.yml's
+              // non-blocking pass, or a person), the gate merges on green and the rest is ledgered.
+              const commits = await github.paginate(github.rest.pulls.listCommits, { owner, repo, pull_number: number, per_page: 100 });
+              const fixedOnce = commits.some(c => ((c.commit && c.commit.message) || "").includes("[review-fix]"));
               if (WINDOW_MS > 0 && !WINDOW_SKIP.some(p => ev.pr.head.ref.startsWith(p))) {
                 let open = await openThreads(number);
+                if (fixedOnce) core.info(`${tag}: fix round already done ([review-fix] commit), no window`);
                 let until = await windowUntil(number);
-                if (open.length && until === null && ev.lastDone + WINDOW_MS > Date.now()) {
+                if (!fixedOnce && open.length && until === null && ev.lastDone + WINDOW_MS > Date.now()) {
                   const iso = new Date(ev.lastDone + WINDOW_MS).toISOString();
                   await github.rest.issues.createComment({ owner, repo, issue_number: number, body:
                     `<!-- fix-window:until=${iso} -->\n⏳ Fix window: ${open.length} non-blocking review thread(s) open on ${ev.pr.head.sha.slice(0, 7)}. ` +
@@ -276,7 +282,7 @@ jobs:
                     `\`BLOCKED\` at the start of the title holds the PR past the window. One window per PR.` });
                   until = await windowUntil(number); // a racing gate run may have posted first; the earliest wins
                 }
-                if (open.length && until !== null && Date.now() < until) {
+                if (!fixedOnce && open.length && until !== null && Date.now() < until) {
                   if (DRAIN) {
                     // A drain never sleeps. The PR's own review/CI completions normally start a
                     // single-PR run that waits; if none is coming, re-drain after the deadline.

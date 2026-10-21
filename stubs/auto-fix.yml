@@ -1,15 +1,18 @@
-# Stub, OPT-IN (install.ps1 -WithAutoFix). Claude fixes CHANGES REQUESTED in CI,
-# max 3 rounds. Needs secret AUTOFIX_PAT; with it unset every step is skipped.
+# Stub, OPT-IN (install.ps1 -WithAutoFix). CI fixes review findings so the
+# session that opened the PR can move on: blocking findings on a red review (max 3
+# rounds), then ONE pass over open non-blocking threads during the gate's fix
+# window. Needs secret AUTOFIX_PAT; with it unset every step is skipped.
 name: auto-fix
 
 on:
   workflow_run:
-    workflows: ["Claude Code Review"]
+    workflows: ["Claude Code Review", "Codex Review"]
     types: [completed]
 
 permissions:
   contents: write
   pull-requests: write
+  checks: read
   actions: read
 
 concurrency:

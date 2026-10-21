@@ -17,7 +17,7 @@ param(
   [string] $Verify = 'pwsh ./verify.ps1',
   [string] $WorkingDirectory = '',   # subfolder the setup + verify steps run in (wrapper repos, e.g. web)
   [string] $Ref = 'main',      # gh-workflows ref the stubs pin: main (rolling) or a tag
-  [switch] $WithAutoFix,       # also install auto-fix.yml + ledger-fix.yml (need AUTOFIX_PAT secret)
+  [switch] $WithAutoFix,       # also install auto-fix.yml + ledger-fix.yml (need AUTOFIX_PAT secret); without it the fix window is 0
   [switch] $Force              # overwrite stubs / PR template that already exist (review-context.md is never overwritten)
 )
 $ErrorActionPreference = 'Stop'
@@ -40,6 +40,9 @@ foreach ($s in $stubs) {
   if ((Test-Path -LiteralPath $to) -and -not $Force) { $skipped += "workflows/$s"; continue }
   $txt = [IO.File]::ReadAllText((Join-Path $src "stubs/$s"))
   $txt = $txt -replace '@main\b', "@$Ref"
+  # The fix window is auto-fix.yml's time for its non-blocking pass; with no
+  # auto-fix stub nothing acts in it, so it would only delay merges.
+  if ($s -eq 'auto-merge.yml' -and -not $WithAutoFix) { $txt = $txt -replace 'fix-window-minutes: \d+', 'fix-window-minutes: 0' }
   if ($s -eq 'ci.yml') {
     $txt = $txt.Replace('__SETUP__', $Setup).Replace('__VERIFY__', $Verify)
     if ($WorkingDirectory) { $txt = $txt -replace '(?m)^\s*# working-directory: web.*$', "      working-directory: $WorkingDirectory" }
