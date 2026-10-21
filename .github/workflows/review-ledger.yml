@@ -27,8 +27,15 @@
 #      `Non-blocking:` line or carry MEDIUM/LOW/P2/P3, minus ones marked `(inline`.
 #   Blocking severities (CRITICAL/HIGH/P0/P1) are dropped: a later PASS cleared them.
 #
-# Loop bound: a PR whose body closes a `review-ledger` issue (`Closes #N`) never
-# files a new one, so ledger-fix.yml's PRs cannot spawn ledgers of their own.
+# Loop bound: a PR whose body closes or refs a `review-ledger` issue (`Closes #N`,
+# `Refs #N`) never files a new one, so ledger-fix.yml's PRs cannot spawn ledgers
+# of their own.
+#
+# Follow-ups are one PR per finding. A PR whose body says
+# `Refs #N (ledger items 3, 5)` ticks those boxes of ledger #N when it merges
+# (k = position among the ledger's checkboxes); the ledger closes itself once
+# every box is ticked or marked `(skipped: ...)`. `Closes #N` still closes the
+# whole ledger at once.
 # Idempotent: one issue per PR, found by the `<!-- review-ledger:pr=N -->` marker.
 name: review-ledger (reusable)
 
@@ -132,6 +139,31 @@ jobs:
               }
             };
 
+            // Tick items `ks` (1-based among the ledger's `- [ ]` / `- [x]` lines, the same
+            // lines ledger-stats.ps1 counts) for merged PR `prNo`, then close the ledger
+            // once no unticked box is left that is not marked `(skipped: ...)`.
+            // Re-runs are no-ops: a ticked box stays ticked, a closed ledger is skipped.
+            const tickLedger = async (issue, ks, prNo) => {
+              const lines = (issue.body || "").split("\n");
+              let k = 0;
+              const ticked = [];
+              for (let i = 0; i < lines.length; i++) {
+                const m = lines[i].match(/^- \[( |x|X)\] /);
+                if (!m) continue;
+                k++;
+                if (ks.includes(k) && m[1] === " ") { lines[i] = "- [x] " + lines[i].slice(6); ticked.push(k); }
+              }
+              const missing = ks.filter(x => x > k);
+              if (missing.length) core.warning(`#${prNo}: ledger #${issue.number} has ${k} items, no item ${missing.join(", ")}`);
+              if (ticked.length) await github.rest.issues.update({ owner, repo, issue_number: issue.number, body: lines.join("\n") });
+              const left = lines.filter(l => /^- \[ \] /.test(l) && !/\(skipped:/i.test(l)).length;
+              core.info(`#${prNo}: ticked ledger #${issue.number} item(s) ${ticked.join(", ") || "none new"}; ${left} open`);
+              if (left) return;
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                body: `🤖 Every item is fixed (ticked) or marked skipped; closing. Last fix: #${prNo}.` });
+              await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: "closed", state_reason: "completed" });
+            };
+
             const failed = [];
             try {
             for (const number of PRS) {
@@ -142,14 +174,21 @@ jobs:
               if (!pr.merged) { core.info(`${tag}: not merged, skip`); continue; }
               if (pr.head.repo && pr.head.repo.full_name !== `${owner}/${repo}`) { core.info(`${tag}: fork PR, skip`); continue; }
 
-              // --- Loop bound: a PR that closes a ledger issue files none ---
-              const refs = [...(pr.body || "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)/gi)].map(m => Number(m[1]));
+              // --- Loop bound: a PR that closes or refs a ledger issue files none ---
+              const body = pr.body || "";
+              const refs = [...new Set([...body.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?)\s*:?\s+#(\d+)/gi)].map(m => Number(m[1])))];
+              // `Refs #N (ledger items 3, 5)`: the per-finding follow-up form; those boxes get ticked.
+              const itemsFor = {};
+              for (const m of body.matchAll(/\brefs?\s*:?\s+#(\d+)\s*\(\s*ledger items?\s+([\d,\s]+)\)/gi))
+                itemsFor[m[1]] = [...new Set(list(m[2]).map(Number).filter(k => Number.isInteger(k) && k > 0))];
               let closesLedger = false;
               for (const n of refs) {
                 try {
                   const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number: n });
-                  if ((issue.labels || []).some(l => (l.name || l) === LABEL)) { closesLedger = true; break; }
-                } catch (e) { core.info(`${tag}: could not read #${n}: ${e.message}`); }
+                  if (!(issue.labels || []).some(l => (l.name || l) === LABEL)) continue;
+                  closesLedger = true;
+                  if (itemsFor[n] && issue.state === "open") await tickLedger(issue, itemsFor[n], number);
+                } catch (e) { core.info(`${tag}: could not read or tick #${n}: ${e.message}`); }
               }
 
               // --- Idempotency: one ledger and one outcomes comment per PR ---
@@ -255,7 +294,7 @@ jobs:
                 body: sections.join("\n\n"),
               });
               await github.rest.issues.update({ owner, repo, issue_number: issue.number,
-                body: issue.body + `\n\nTo close: fix them in a PR whose description says \`Closes #${issue.number}\` (that PR files no ledger of its own), or close this by hand for findings not worth fixing. Add the label \`${FIX_LABEL}\` to have CI open that PR (needs the ledger-fix stub and \`AUTOFIX_PAT\`).` });
+                body: issue.body + `\n\nTo close: fix each finding in its own small PR whose description says \`Refs #${issue.number} (ledger items <k>)\`, k = the item's position in the list above (findings in the same file can share one PR). Each merge ticks its boxes and this issue closes when every box is ticked or marked \`(skipped: <reason>)\`; such PRs file no ledger of their own. Or close this by hand for findings not worth fixing. Add the label \`${FIX_LABEL}\` to have CI open those PRs (needs the ledger-fix stub and \`AUTOFIX_PAT\`).` });
               filed.push(issue.number);
               await recordOutcomes(issue.number);
               core.notice(`${tag}: filed review ledger #${issue.number} (${inline.length} inline, ${fromSummary.length} from summaries)`);

@@ -53,8 +53,8 @@ jobs:
           close-issue-reason: not_planned
           stale-issue-message: >-
             This review ledger is ${{ inputs.days-before-stale }} days old. It closes as not planned
-            in ${{ inputs.days-before-close }} more days. Fix the items in a PR whose description says
-            `Closes #<this issue>`, add `auto-fix`, or add `${{ inputs.exempt-label }}` to exempt it.
+            in ${{ inputs.days-before-close }} more days. Fix each item in a PR whose description says
+            `Refs #<this issue> (ledger items <k>)`, add `auto-fix`, or add `${{ inputs.exempt-label }}` to exempt it.
           close-issue-message: >-
             Expired with no fix (${{ inputs.days-before-stale }} + ${{ inputs.days-before-close }} days).
             Unticked items count as expired in the ledger stats. Reopen, or let a future review raise
