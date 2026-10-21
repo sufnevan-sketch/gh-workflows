@@ -43,7 +43,7 @@ pwsh set-secrets.ps1 -Repo <owner>/<repo>            # -Names CLAUDE_CODE_OAUTH_
 gh secret list --repo <owner>/<repo>
 ```
 
-   `CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token` (interactive, run it yourself). A fine-grained PAT covers one owner, so `AUTOFIX_PAT` usually differs per owner: the helper reads `AUTOFIX_PAT_<OWNER>` (owner upper-cased, `-` -> `_`, e.g. `AUTOFIX_PAT_SUFNEVAN_SKETCH`) before plain `AUTOFIX_PAT`, and still sets the repo secret as `AUTOFIX_PAT`; an empty owner line is reported missing, never replaced by another owner's token. Do not run `gh secret set` interactively from a non-TTY tool: it stores an empty value silently.
+   `CLAUDE_CODE_OAUTH_TOKEN` comes from `claude setup-token` (interactive, run it yourself). A fine-grained PAT covers one owner, so `AUTOFIX_PAT` usually differs per owner: the helper reads `AUTOFIX_PAT_<OWNER>` (owner upper-cased, `-` -> `_`, e.g. `AUTOFIX_PAT_SUFNEVAN_SKETCH`) before plain `AUTOFIX_PAT`, and still sets the repo secret as `AUTOFIX_PAT`; an empty owner line is reported missing, never replaced by another owner's token. Any other line name works with `-Names AUTOFIX_PAT=<ENV_LINE>` (e.g. `AUTOFIX_PAT=AUTOFIX_PAT_CAM`). Do not run `gh secret set` interactively from a non-TTY tool: it stores an empty value silently.
 3. The **Claude Code GitHub App** must cover the repo, or `claude / claude-review` fails after ~30s with `Claude Code is not installed on this repository`. The OAuth token authenticates you; the App is what grants the action a token for THIS repo, and the two are independent. An install scoped to "selected repositories" silently excludes every new repo. Check it before the PR:
 
    ```bash
