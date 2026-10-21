@@ -30,10 +30,22 @@ on:
         description: "cloud (ChatGPT plan, @codex review) | action (openai/codex-action, API key)"
         type: string
         default: cloud
+      wait:
+        description: "cloud: true = hold a runner polling until Codex answers (old stubs). false = ask and exit; codex-route.yml dispatches the verdict when Codex answers (needs the new stub pair)."
+        type: boolean
+        default: true
       wait-minutes:
-        description: "cloud: how long to wait for the Codex review before failing"
+        description: "cloud, wait: true: how long to wait for the Codex review before failing"
         type: number
         default: 20
+      pr:
+        description: "verdict run (workflow_dispatch from codex-route.yml): the PR number"
+        type: string
+        default: ""
+      verdict-sha:
+        description: "verdict run: the head SHA Codex reviewed; the verdict is skipped unless it is still the branch tip"
+        type: string
+        default: ""
       trigger-comment:
         type: string
         # The text after `@codex review for` is Codex's documented one-off review focus.
@@ -60,9 +72,14 @@ permissions:
   pull-requests: write
 
 jobs:
-  codex-review:
-    name: codex-review
+  # ------------------------------------------------------------ cloud: ask
+  # Its own job (check "codex / codex-request"), so with `wait: false` the PR
+  # carries no `codex / codex-review` at all until Codex answers: the gate reads
+  # that as required-missing and holds, and nothing green appears early.
+  codex-request:
+    name: codex-request
     if: >-
+      github.event_name == 'pull_request' && inputs.mode == 'cloud' &&
       !github.event.pull_request.draft && (
         startsWith(github.head_ref, 'feat/') ||
         startsWith(github.head_ref, 'fix/') ||
@@ -72,15 +89,32 @@ jobs:
         contains(github.event.pull_request.labels.*.name, 'codex-review') ||
         contains(github.event.pull_request.labels.*.name, 'risk:high'))
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
+    outputs:
+      docs-only: ${{ steps.docs.outputs.docs-only }}
+      already-reviewed: ${{ steps.ask.outputs.already-reviewed }}
     env:
       PR: ${{ github.event.pull_request.number }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       CODEX_BOT: chatgpt-codex-connector[bot]
     steps:
-      # ---------------------------------------------------------------- cloud
+      # A docs-only diff has no code for Codex to review: codex-review then passes
+      # without asking. The codex-review / risk:high labels still force a review.
+      - name: Docs-only change?
+        id: docs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCED: ${{ contains(github.event.pull_request.labels.*.name, 'codex-review') || contains(github.event.pull_request.labels.*.name, 'risk:high') }}
+        run: |
+          files=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" --jq '.[].filename')
+          code=$(printf '%s\n' "$files" | grep -v -i -E '\.(md|mdx|markdown|txt|rst|adoc)$' | grep -c . || true)
+          docs=false
+          if [ "$FORCED" != "true" ] && [ -n "$files" ] && [ "${code:-0}" -eq 0 ]; then docs=true; echo "every changed file is documentation; Codex not asked"; fi
+          echo "docs-only=${docs}" >> "$GITHUB_OUTPUT"
+
       - name: Ask Codex for a review (cloud)
-        if: inputs.mode == 'cloud'
+        id: ask
+        if: steps.docs.outputs.docs-only != 'true'
         env:
           GH_TOKEN: ${{ secrets.CODEX_TRIGGER_PAT }}
           PAT_SET: ${{ secrets.CODEX_TRIGGER_PAT != '' }}
@@ -99,17 +133,112 @@ jobs:
           have_clean=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments?per_page=100" \
             --jq '[.[] | select(.user.login == env.CODEX_BOT and (.body | contains("Reviewed commit")) and (.body | contains(env.SHA10)))] | length')
           if [ "${have:-0}" -gt 0 ] || [ "${have_clean:-0}" -gt 0 ]; then
+            # A same-SHA re-trigger (labeled, reopened) after the verdict: codex-review
+            # must re-read the answer in THIS run, or its newer skipped check would
+            # displace the green one and nothing would ever dispatch another verdict.
+            echo "already-reviewed=true" >> "$GITHUB_OUTPUT"
             echo "Codex already reviewed ${HEAD_SHA:0:7}; not re-asking"; exit 0
           fi
           gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "${TRIGGER} (commit ${HEAD_SHA:0:7}; requested by the codex-review check)"
           echo "asked for a review of ${HEAD_SHA:0:7}"
 
-      - name: Wait for the Codex review on this commit (cloud)
-        if: inputs.mode == 'cloud'
+      - name: Explain the wait (cloud, wait false)
+        if: ${{ !inputs.wait && steps.docs.outputs.docs-only != 'true' }}
+        run: |
+          {
+            echo "Asked Codex to review ${HEAD_SHA:0:7}. No runner waits for the answer: when Codex posts its review or its"
+            echo "\"Reviewed commit\" comment, codex-route.yml dispatches the verdict run, which posts \`codex / codex-review\`."
+            echo "Until then the gate holds this PR (required check missing). If no verdict appears within about 20 minutes,"
+            echo "re-run this job to ask again, or push a commit."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------- verdict run: guard
+  # A dispatched verdict run must never put a green codex-review on a commit
+  # Codex did not review. Any doubt here ends with go=false, and codex-review
+  # is then SKIPPED (the gate accepts only success, so skipped holds the PR).
+  codex-guard:
+    name: codex-guard
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'cloud' && inputs.verdict-sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      go: ${{ steps.g.outputs.go }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ inputs.pr }}
+      SHA: ${{ inputs.verdict-sha }}
+      TIP: ${{ github.sha }}
+    steps:
+      - id: g
+        run: |
+          go=false
+          if ! [[ "$PR" =~ ^[0-9]+$ && "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::bad inputs pr='$PR' verdict-sha='$SHA'"; exit 1
+          fi
+          state=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq '"\(.state) \(.head.sha)"')
+          if [ "$TIP" != "$SHA" ]; then
+            echo "branch tip ${TIP:0:7} is not the reviewed ${SHA:0:7}: the newer push gets its own review"
+          elif [ "$state" != "open $SHA" ]; then
+            echo "PR #${PR} is not open at ${SHA:0:7} (${state})"
+          else
+            # Even when a verdict for this SHA is already posted (Codex answered with
+            # a review AND a comment, or an old-stub run got there first), run it
+            # again: a skipped codex-review here would be the newest check on the
+            # head and displace the green one. Same answer, same verdict; the verdict
+            # step does not post a duplicate review.
+            go=true
+          fi
+          echo "go=${go}" >> "$GITHUB_OUTPUT"
+
+  # ----------------------------------------------------------- verdict
+  # Runs (1) on pull_request for `wait: true` cloud stubs, action mode, and
+  # docs-only diffs, or (2) on a guarded verdict dispatch. Check name: "codex / codex-review".
+  codex-review:
+    name: codex-review
+    needs: [codex-request, codex-guard]
+    if: >-
+      always() && needs.codex-request.result != 'failure' && needs.codex-request.result != 'cancelled' && ((
+        github.event_name == 'pull_request' &&
+        (inputs.wait || inputs.mode == 'action' || needs.codex-request.outputs.docs-only == 'true' ||
+         needs.codex-request.outputs.already-reviewed == 'true') &&
+        !github.event.pull_request.draft && (
+          startsWith(github.head_ref, 'feat/') ||
+          startsWith(github.head_ref, 'fix/') ||
+          startsWith(github.head_ref, 'refactor/') ||
+          startsWith(github.head_ref, 'perf/') ||
+          startsWith(github.head_ref, 'build/') ||
+          contains(github.event.pull_request.labels.*.name, 'codex-review') ||
+          contains(github.event.pull_request.labels.*.name, 'risk:high'))
+      ) || needs.codex-guard.outputs.go == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PR: ${{ github.event.pull_request.number || inputs.pr }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.verdict-sha }}
+      CODEX_BOT: chatgpt-codex-connector[bot]
+      DOCS_ONLY: ${{ needs.codex-request.outputs.docs-only == 'true' }}
+    steps:
+      - name: Pass a docs-only change without asking Codex
+        if: env.DOCS_ONLY == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "CODEX-REVIEW: PASS"
+            echo
+            echo "Every file this PR changes at ${HEAD_SHA:0:7} is documentation, so Codex was not asked. Label the PR codex-review to force a review."
+          } > /tmp/verdict.md
+          gh pr review "$PR" --repo "$GITHUB_REPOSITORY" --comment --body-file /tmp/verdict.md
+          cat /tmp/verdict.md >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------------------------------------------------------------- cloud
+      - name: Read the Codex review on this commit (cloud)
+        if: inputs.mode == 'cloud' && env.DOCS_ONLY != 'true'
         id: cloud
         env:
           GH_TOKEN: ${{ github.token }}
-          WAIT_MIN: ${{ inputs.wait-minutes }}
+          # A verdict run starts only after Codex answered, so it never needs the long wait.
+          WAIT_MIN: ${{ github.event_name == 'workflow_dispatch' && 2 || inputs.wait-minutes }}
         run: |
           deadline=$(( $(date +%s) + WAIT_MIN * 60 ))
           export SHA10="${HEAD_SHA:0:10}"
@@ -145,7 +274,15 @@ jobs:
             echo "Codex cloud review of ${HEAD_SHA:0:7}: ${count} P0/P1 finding(s). Inline comments by ${CODEX_BOT} are the source; this summary is parsed by the merge gate."
             if [ "$count" -gt 0 ]; then echo; echo "Findings:"; printf '%s\n' "$findings" | nl -w1 -s'. '; fi
           } > /tmp/verdict.md
-          gh pr review "$PR" --repo "$GITHUB_REPOSITORY" --comment --body-file /tmp/verdict.md
+          # A re-read of the same answer (same-SHA re-trigger, second dispatch) posts no duplicate.
+          export FIRST="CODEX-REVIEW: ${verdict}"
+          posted=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/reviews?per_page=100" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and .commit_id == env.HEAD_SHA and (.body | startswith(env.FIRST))) | .id' | grep -c . || true)
+          if [ "${posted:-0}" -eq 0 ]; then
+            gh pr review "$PR" --repo "$GITHUB_REPOSITORY" --comment --body-file /tmp/verdict.md
+          else
+            echo "verdict for ${HEAD_SHA:0:7} already posted; not posting it again"
+          fi
           cat /tmp/verdict.md >> "$GITHUB_STEP_SUMMARY"
           echo "verdict=${verdict}" >> "$GITHUB_OUTPUT"
           if [ "$verdict" != "PASS" ]; then echo "::error::Codex found ${count} P0/P1 issue(s); see the inline comments on PR #${PR}"; exit 1; fi

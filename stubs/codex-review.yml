@@ -1,15 +1,31 @@
 # Stub. The real workflow lives in sufnevan-sketch/gh-workflows. Runs only on
 # feat/ fix/ refactor/ perf/ build/ branches or with label codex-review /
 # risk:high. Check name: "codex / codex-review".
+#
+# `wait: false`: the pull_request run only asks Codex ("codex / codex-request")
+# and exits. When Codex answers, the codex-route stub dispatches this workflow
+# with pr + verdict-sha, and that run posts "codex / codex-review". Install the
+# two stubs together; without codex-route the verdict never arrives and the gate
+# holds every code PR. `wait: true` is the old behavior: one runner polls until
+# Codex answers (billed the whole time on a private repo).
 name: Codex Review
 
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened, labeled]
+  workflow_dispatch: # verdict run, dispatched by codex-route
+    inputs:
+      pr:
+        type: string
+        default: ""
+      verdict-sha:
+        type: string
+        default: ""
 
 concurrency:
-  group: codex-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: codex-review-${{ github.event.pull_request.number || inputs.pr }}
+  # A push supersedes its older ask or verdict; a verdict never cancels anything.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -18,6 +34,10 @@ permissions:
 jobs:
   codex:
     uses: sufnevan-sketch/gh-workflows/.github/workflows/codex-review.yml@main
+    with:
+      wait: false
+      pr: ${{ inputs.pr }}
+      verdict-sha: ${{ inputs.verdict-sha }}
     secrets:
       # Explicit, never `inherit`: GitHub passes inherited secrets only to a
       # reusable workflow in the SAME org or enterprise. This repo is a user
