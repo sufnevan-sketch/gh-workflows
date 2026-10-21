@@ -41,6 +41,21 @@ function Invoke-GitText([string]$RepoRoot, [string[]]$GitArgs) {
     $text -replace "`r`n", "`n"
 }
 
+# Full commit SHA the stubs for a config ref come from: origin/main for 'main', the tag's
+# commit otherwise. GHW_STUB_SHA (test hook) overrides both.
+function Resolve-StubSha {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string]$Ref
+    )
+
+    $rev = if ($env:GHW_STUB_SHA) { $env:GHW_STUB_SHA }
+           elseif ($Ref -ceq 'main') { 'origin/main' }
+           else { "refs/tags/$Ref" }
+    (Invoke-GitText $RepoRoot @('rev-parse', '--verify', "$rev^{commit}")).Trim()
+}
+
 function Get-StubsAtSha {
     [CmdletBinding()]
     param(
@@ -256,4 +271,4 @@ function Read-StubLock {
     [pscustomobject]@{ sha = $raw['sha']; files = $files }
 }
 
-Export-ModuleMember -Function Get-StubsAtSha, Get-DefaultStubSet, Invoke-StubRender, Get-TextSha256, New-StubLock, Read-StubLock
+Export-ModuleMember -Function Resolve-StubSha, Get-StubsAtSha, Get-DefaultStubSet, Invoke-StubRender, Get-TextSha256, New-StubLock, Read-StubLock

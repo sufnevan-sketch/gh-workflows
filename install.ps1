@@ -40,19 +40,29 @@ function Invoke-Git([string[]] $GitArgs) {
   $o
 }
 
-# Stubs come from git objects at a resolved SHA (origin/main of this checkout), never the working tree.
-if ($env:GHW_STUB_SHA) { $rev = $env:GHW_STUB_SHA }
-else { Invoke-Git @('fetch', '-q', 'origin') | Out-Null; $rev = 'origin/main' }
-$sha = ([string](Invoke-Git @('rev-parse', '--verify', "$rev^{commit}"))).Trim()
-$stubText = Get-StubsAtSha -RepoRoot $src -Sha $sha
+# An existing .github/gh-workflows.json is the base config; only parameters passed explicitly override it.
+$cfgPath = Join-Path $dst 'gh-workflows.json'
+if (Test-Path -LiteralPath $cfgPath) {
+  $config = Read-StubConfig ($utf8.GetString([IO.File]::ReadAllBytes($cfgPath)))
+  foreach ($p in @(@('Setup', 'setup', $Setup), @('Verify', 'verify', $Verify), @('WorkingDirectory', 'working-directory', $WorkingDirectory), @('Ref', 'ref', $Ref), @('Merge', 'merge', $Merge))) {
+    if ($PSBoundParameters.ContainsKey($p[0])) { $config.($p[1]) = $p[2] }
+  }
+  if ($WithAutoFix) { $config.'auto-fix' = $true }
+  $config = Read-StubConfig (ConvertTo-StubConfigJson $config)   # re-validate the merged result
+} else {
+  # The fix window is auto-fix.yml's time for its non-blocking pass; with no auto-fix stub
+  # nothing acts in it, so an existing auto-fix.yml keeps the window on.
+  $autoFix = $WithAutoFix.IsPresent -or (Test-Path -LiteralPath (Join-Path $dst 'workflows/auto-fix.yml'))
+  $cfgIn = [ordered]@{ ref = $Ref; setup = $Setup; verify = $Verify; merge = $Merge; 'auto-fix' = $autoFix }
+  if ($WorkingDirectory) { $cfgIn['working-directory'] = $WorkingDirectory }
+  $config = Read-StubConfig ($cfgIn | ConvertTo-Json)
+}
 
-# codex-review.yml (wait: false) and codex-route.yml are a pair: without the route, no Codex verdict arrives.
-# The fix window is auto-fix.yml's time for its non-blocking pass; with no auto-fix stub
-# nothing acts in it, so an existing auto-fix.yml keeps the window on.
-$autoFix = $WithAutoFix.IsPresent -or (Test-Path -LiteralPath (Join-Path $dst 'workflows/auto-fix.yml'))
-$cfgIn = [ordered]@{ ref = $Ref; setup = $Setup; verify = $Verify; merge = $Merge; 'auto-fix' = $autoFix }
-if ($WorkingDirectory) { $cfgIn['working-directory'] = $WorkingDirectory }
-$config = Read-StubConfig ($cfgIn | ConvertTo-Json)
+# Stubs come from git objects at a resolved SHA (origin/main, or the tag the config pins), never the working tree.
+# GHW_STUB_SHA is a test hook: it replaces the resolved SHA so tests need no network.
+if (-not $env:GHW_STUB_SHA) { Invoke-Git @('fetch', '-q', '--tags', 'origin') | Out-Null }
+$sha = Resolve-StubSha -RepoRoot $src -Ref $config.ref
+$stubText = Get-StubsAtSha -RepoRoot $src -Sha $sha
 $tags = [string[]]@((Invoke-Git @('tag', '-l')) | Where-Object { $_ })
 Test-StubConfig -Config $config -StubNames ([string[]]@($stubText.Keys)) -Tags $tags
 $rendered = Invoke-StubRender -Stubs $stubText -Config $config
@@ -61,26 +71,32 @@ $lockFiles = [ordered]@{}
 foreach ($key in $rendered.Keys) {
   $rel = $key -replace '^\.github/', ''
   $to = Join-Path $Repo $key
-  $exists = Test-Path -LiteralPath $to
-  if ($exists -and -not $Force) {
-    # Opt-in upgrade: an auto-merge stub installed earlier without auto-fix has a 0 window and
-    # would be skipped. Re-render it so the fix pass has time.
-    $onDisk = $utf8.GetString([IO.File]::ReadAllBytes($to))
-    if ($WithAutoFix -and $key -ceq '.github/workflows/auto-merge.yml' -and $onDisk -match 'fix-window-minutes: 0\b') {
-      Write-Lf $to $rendered[$key]
-      Write-Host "Updated : workflows/auto-merge.yml fix-window-minutes 0 -> 15 (auto-fix needs the window)"
-    } else {
-      $skipped += $rel
+  if ((Test-Path -LiteralPath $to) -and -not $Force) {
+    $skipThis = $true
+    # Opt-in upgrade: an auto-merge stub installed earlier without auto-fix has a 0 window.
+    # Rewrite it only when it is still the pristine render of the same config without auto-fix.
+    if ($WithAutoFix -and $key -ceq '.github/workflows/auto-merge.yml') {
+      $onDisk = $utf8.GetString([IO.File]::ReadAllBytes($to))
+      $prev = $config.PSObject.Copy(); $prev.'auto-fix' = $false
+      $prevRender = Invoke-StubRender -Stubs $stubText -Config $prev
+      if ($prevRender.Contains($key) -and $onDisk -ceq $prevRender[$key]) {
+        Write-Lf $to $rendered[$key]
+        Write-Host "Updated : workflows/auto-merge.yml fix-window-minutes 0 -> 15 (auto-fix needs the window)"
+        $skipThis = $false
+      } else {
+        Write-Warning "workflows/auto-merge.yml differs from a pristine install, so it was not rewritten. Set its fix-window-minutes to 15 by hand (auto-fix needs the window), or rerun with -Force."
+      }
     }
+    if ($skipThis) { $skipped += $rel }
   } else {
     Write-Lf $to $rendered[$key]
     $copied += $rel
   }
-  # Record what is actually on disk (a skipped file keeps its own hash).
-  $lockFiles[$key] = Get-TextSha256 ($utf8.GetString([IO.File]::ReadAllBytes($to)))
+  # The lock records the RENDER, not the disk, so a hand-edited stub reads as modified to sync.
+  $lockFiles[$key] = Get-TextSha256 $rendered[$key]
 }
 
-Write-Lf (Join-Path $dst 'gh-workflows.json') (ConvertTo-StubConfigJson $config)
+Write-Lf $cfgPath (ConvertTo-StubConfigJson $config)
 Write-Lf (Join-Path $dst 'gh-workflows.lock') (New-StubLock -Sha $sha -Files $lockFiles)
 $copied += 'gh-workflows.json', 'gh-workflows.lock'
 

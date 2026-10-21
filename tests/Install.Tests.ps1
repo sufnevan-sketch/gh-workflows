@@ -39,7 +39,7 @@ Describe 'install.ps1' {
         foreach ($k in $lock.files.Keys) { $lock.files[$k] | Should -Be (Get-Sha (Join-Path $t $k)) -Because $k }
     }
 
-    It 'existing stubs are skipped without -Force and the lock records the file on disk' {
+    It 'existing stubs are skipped without -Force and the lock records the render, not the disk' {
         $t = New-Target
         New-Item -ItemType Directory -Force (Join-Path $t '.github/workflows') | Out-Null
         $ci = Join-Path $t '.github/workflows/ci.yml'
@@ -47,7 +47,10 @@ Describe 'install.ps1' {
         Invoke-Install $t | Out-Null
         [IO.File]::ReadAllText($ci) | Should -Be "name: custom`n"
         $lock = Read-StubLock (Get-Content (Join-Path $t '.github/gh-workflows.lock') -Raw)
-        $lock.files['.github/workflows/ci.yml'] | Should -Be (Get-TextSha256 "name: custom`n")
+        $fresh = New-Target
+        Invoke-Install $fresh | Out-Null
+        $lock.files['.github/workflows/ci.yml'] | Should -Be (Get-Sha (Join-Path $fresh '.github/workflows/ci.yml'))
+        $lock.files['.github/workflows/ci.yml'] | Should -Not -Be (Get-TextSha256 "name: custom`n")
         Invoke-Install $t @('-Force') | Out-Null
         [IO.File]::ReadAllText($ci) | Should -Not -Be "name: custom`n"
     }
@@ -74,5 +77,52 @@ Describe 'install.ps1' {
     It 'rejects a -Ref that is not main or an existing tag' {
         $t = New-Target
         { Invoke-Install $t @('-Ref', 'v999') } | Should -Throw
+    }
+
+    It 'keeps an existing config and applies only explicitly passed parameters' {
+        $t = New-Target
+        New-Item -ItemType Directory -Force (Join-Path $t '.github') | Out-Null
+        $in = '{"setup":"python","merge":"manual","with":{"ci.yml/ci":{"timeout-minutes":30}}}'
+        [IO.File]::WriteAllText((Join-Path $t '.github/gh-workflows.json'), $in)
+        Invoke-Install $t @('-WithAutoFix') | Out-Null
+        $cfg = Get-Content (Join-Path $t '.github/gh-workflows.json') -Raw | ConvertFrom-Json
+        $cfg.merge | Should -Be 'manual'
+        $cfg.setup | Should -Be 'python'
+        $cfg.'auto-fix' | Should -BeTrue
+        $cfg.with.'ci.yml/ci'.'timeout-minutes' | Should -Be 30
+    }
+
+    It 'rewrites a pristine auto-merge.yml on -WithAutoFix but warns and keeps an edited one' {
+        $t = New-Target
+        Invoke-Install $t | Out-Null
+        $am = Join-Path $t '.github/workflows/auto-merge.yml'
+        $edited = [IO.File]::ReadAllText($am) + "# local edit`n"
+        [IO.File]::WriteAllText($am, $edited)
+        $out = Invoke-Install $t @('-WithAutoFix')
+        [IO.File]::ReadAllText($am) | Should -Be $edited
+        $out | Should -Match 'auto-merge.yml differs'
+        $lock = Read-StubLock (Get-Content (Join-Path $t '.github/gh-workflows.lock') -Raw)
+        $lock.files['.github/workflows/auto-merge.yml'] | Should -Not -Be (Get-Sha $am)
+    }
+}
+
+Describe 'Resolve-StubSha' {
+    It 'resolves a tag to its commit and main to origin/main' {
+        $r = Join-Path $TestDrive 'shaRepo'
+        New-Item -ItemType Directory $r | Out-Null
+        git -C $r init -q
+        git -C $r -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m one
+        git -C $r tag v1
+        git -C $r -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m two
+        $v1 = (git -C $r rev-parse v1).Trim()
+        $head = (git -C $r rev-parse HEAD).Trim()
+        $v1 | Should -Not -Be $head
+        $saved = $env:GHW_STUB_SHA; Remove-Item Env:GHW_STUB_SHA -ErrorAction SilentlyContinue
+        try {
+            Resolve-StubSha -RepoRoot $r -Ref 'v1' | Should -Be $v1
+            { Resolve-StubSha -RepoRoot $r -Ref 'v9' } | Should -Throw
+            git -C $r update-ref refs/remotes/origin/main $head
+            Resolve-StubSha -RepoRoot $r -Ref 'main' | Should -Be $head
+        } finally { if ($saved) { $env:GHW_STUB_SHA = $saved } }
     }
 }
