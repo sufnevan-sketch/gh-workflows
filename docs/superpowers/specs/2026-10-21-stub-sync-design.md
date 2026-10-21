@@ -70,7 +70,7 @@ The renderer rejects a config it cannot render safely, instead of splicing raw t
    - **Drift**: an owned stub file on the default branch does not match its lock hash (hand edit), or a file the lock lists is missing.
    - The repo is `merge: manual`.
 5. Bring the standing branch `chore/gh-workflows-sync` (one per repo, so a repo never collects a stack of sync PRs) and its PR up to date with the rendered files, deletions of owned files no longer rendered, and the new lock. All writes go through the GitHub API (no local clone of each repo). **Ownership of the branch is judged by content, not author** (the sync's commits, Evan's own pushes and every agent session using his `gh` login all show as Evan): the branch is the sync's own if its tree differs from the default branch only in owned files and the lock, and those equal the render named by the branch's own lock. If so, force-update it. If not, someone else changed it: leave the PR as is and report it. The PR body says what changed (stub names, gh-workflows commit range) and, when it will not merge itself, why.
-6. Merge, only when step 4 allowed it: wait (locally, which costs no Actions minutes) for `ci / branch-name` and `ci / verify` to complete on the PR's head SHA, with a cap per repo; if both are green and `headSha` matches the pushed SHA, squash-merge. If red, leave the PR open and report it. If the cap runs out, leave it; the next run picks it up.
+6. Merge, only when step 4 allowed it, as a second pass after steps 1–5 have run for **every** repo: wait once, for all pending PRs together, under one overall cap that keeps the whole run inside a single 10-minute tool call (the Claude tool limit; a run killed mid-way reports nothing). Waiting is local and costs no Actions minutes. For each PR whose `ci / branch-name` and `ci / verify` completed green on a head SHA that matches the pushed SHA, squash-merge. Red: leave open and report. Still running when the cap ends: leave it; the next run merges it. A PR opened by an earlier run and already green is merged in this pass without waiting.
 7. Prints a summary: per repo, one outcome (current, merged, left open with reason, failed with reason). This stays local: the scheduled task's run output.
 
 The sync merges directly rather than through each repo's gate, so the gate's refusal stays absolute for every other PR, and a manual repo is simply "open, don't merge".
@@ -97,6 +97,8 @@ Because the gate refuses config and lock changes, each adoption PR is a one-time
 A Claude scheduled task (the same mechanism as `daily-github-stars`) runs once a day: `git fetch` in the gh-workflows checkout, then `pwsh sync.ps1 -Owners <the owners>`. The owner list lives in the task's own prompt, on this PC, so it never enters the public repo. The task reads the summary and tells Evan only when something needs him (a PR left open, a failure); a day where every repo is current or merged ends quietly. Run notices never go to Todoist.
 
 After merging a stub change, Evan (or the session that merged it) can also run the task on demand instead of waiting for the next day.
+
+The task must be able to push and merge with nobody watching, which no existing task proves: `daily-github-stars` does GitHub writes through `gh` unattended (star Lists, 3 successful runs by 2026-10-21) but deliberately never pushes. So the task's prompt runs exactly one fixed command, `pwsh <gh-workflows path>/sync.ps1 -Owners ...`, and that one command is allowlisted narrowly in Claude Code permissions. That allowlist entry is a settings change Evan approves at build time. The task does nothing else that could hit a permission prompt.
 
 ### 7. Reporting
 
@@ -127,8 +129,9 @@ Trust: whoever can push to gh-workflows `main` already controls every installed 
 - **Lock moves only when rendered output changes**: no lock-only PRs on gh-workflows commits that touch no stub.
 - **One standing sync branch per repo**, force-updated only while its content is exactly the sync's render (ownership by content, since every writer has the same identity).
 - **Writes through the GitHub API**, no local clones of the target repos.
-- **Wait for CI locally with a cap** (free on the PC); a later run picks up anything still running.
+- **Open every PR first, then one shared CI wait** under a cap that fits one 10-minute tool call; a later run merges anything still running.
 - **Daily schedule plus on-demand runs.**
+- **One fixed, narrowly allowlisted command** is all the scheduled task runs.
 - **Config schema covers the per-repo edits the README and stubs document today**; anything else is drift.
 - **Renderer validates instead of splicing raw text**; `ref` limited to `main` or a tag.
 
@@ -136,15 +139,15 @@ Trust: whoever can push to gh-workflows `main` already controls every installed 
 
 - Config/lock exact schema and file format (JSON vs YAML).
 - How adoption handles each kind of difference in step 5.4.
-- The CI wait cap and the time of day for the schedule.
+- The exact wait cap within the 10-minute limit, and the time of day for the schedule.
 - Selftest additions to `self-check.yml` (renderer is deterministic; rendering every stub with representative configs passes actionlint).
 
 ## Verification
 
-- **Before building**: confirm the orgs that hold installed repos do not restrict the `gh` CLI's OAuth app (org settings, Third-party access); a restriction would block the sync there.
+- **Already checked (2026-10-21)**: the `gh` login reads `.github/workflows/` contents of private repos in all three owners, so no org restricts the `gh` CLI's OAuth app; Evan is admin in each org.
 - **Renderer**: for each installed repo, adopt in dry-run and confirm the render of its inferred config equals its current files, or that every difference is explained. Output kept out of this public repo.
 - **Gate**: a PR touching only `.github/gh-workflows.json` is refused by the gate with a hand-merge reason; a docs-only PR still merges.
 - **Sync, dry-run**: `sync.ps1 -WhatIf` lists, per repo, what it would push, delete and merge, and writes nothing. Run it against the real owners before the first real run.
 - **End to end**: on a throwaway private repo with the stubs installed and `ref` pinned to a test tag, move the tag to a commit with a changed stub, run the sync, and confirm: PR opened, CI green, merged. Then confirm each hold: a hand-edited stub (drift), `merge: manual`, a commit pushed to the sync branch by hand; each leaves the PR open with the right reason. Then remove a stub from the template and confirm it is deleted. Then a gh-workflows commit that changes no stub: confirm no PR. Then a config with a newline in `verify`: confirm the renderer rejects it.
-- **Scheduled task**: one scheduled run with nothing to do ends quietly; one with a held PR notifies.
+- **Scheduled task**: a real scheduled run (not "Run now" from a watched session) opens a sync PR **and merges it** with no permission prompt; one with nothing to do ends quietly; one with a held PR notifies.
 - **Privacy**: grep this repo for private owner names.
