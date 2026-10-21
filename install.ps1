@@ -25,7 +25,7 @@ $src = $PSScriptRoot
 $Repo = (Resolve-Path -LiteralPath $Repo).Path
 if (-not (Test-Path -LiteralPath (Join-Path $Repo '.git'))) { throw "$Repo is not a git repo root (no .git). Run from the repo that owns the workflows, not a wrapper." }
 
-# codex-review.yml (wait: false) and codex-route.yml are a pair: without the route, the Codex verdict never arrives.
+# codex-review.yml (wait: false) and codex-route.yml are a pair: without the route, no Codex verdict arrives.
 $stubs = @('ci.yml', 'claude-review.yml', 'codex-review.yml', 'codex-route.yml', 'auto-merge.yml', 'claude.yml')
 if ($WithAutoFix) { $stubs += 'auto-fix.yml', 'ledger-fix.yml' }
 
