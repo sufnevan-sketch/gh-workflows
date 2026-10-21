@@ -7,11 +7,26 @@
 # (cloud mode needs no API key; OPENAI_API_KEY only if codex switches to
 # mode: action). `inherit` is correct here and only here: these calls are
 # local, so the caller and callee are the same repo.
+#
+# Codex runs with `wait: false`, like the stubs: self-route.yml dispatches this
+# workflow with pr + verdict-sha when Codex answers (the claude job skips those runs).
 name: self-review
 
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      pr:
+        type: string
+        default: ""
+      verdict-sha:
+        type: string
+        default: ""
+
+concurrency:
+  group: self-review-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -22,8 +37,13 @@ permissions:
 
 jobs:
   claude:
+    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/claude-review.yml
     secrets: inherit
   codex:
     uses: ./.github/workflows/codex-review.yml
+    with:
+      wait: false
+      pr: ${{ inputs.pr }}
+      verdict-sha: ${{ inputs.verdict-sha }}
     secrets: inherit

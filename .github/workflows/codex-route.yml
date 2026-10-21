@@ -1,0 +1,64 @@
+# codex-route.yml (reusable) — turns Codex's answer into a verdict run, so no
+# runner sits polling while Codex reviews (cloud mode, `wait: false`).
+#
+# The caller stub (stubs/codex-route.yml) fires on pull_request_review and
+# issue_comment, and its job-level `if` lets only chatgpt-codex-connector[bot]
+# through: every other review or comment makes a skipped run, which costs no
+# minutes. Its workflow name must NOT be in the gate's or auto-fix's
+# `workflow_run` lists, or each skipped run would start a billed gate job.
+#
+# Codex answers in one of two shapes: a review (with findings) whose commit_id is
+# the reviewed SHA, or an issue comment `**Reviewed commit:** \`<sha10>\`` (clean).
+# When the reviewed SHA is still the PR head, this dispatches the caller's
+# codex-review workflow on the head branch with pr + verdict-sha. That run's
+# check lands on the branch tip, so the gate and auto-fix map it to the PR by
+# SHA through their usual `workflow_run` trigger. codex-review's guard job
+# re-checks the tip, so a push between dispatch and run never turns green.
+name: Codex Route (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      codex-workflow:
+        description: "File name of the caller's codex-review stub (the workflow to dispatch)"
+        type: string
+        default: codex-review.yml
+
+permissions:
+  actions: write # workflow_dispatch (GITHUB_TOKEN may dispatch; other events it makes start nothing)
+  pull-requests: read
+
+jobs:
+  route:
+    name: route
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CODEX_BOT: chatgpt-codex-connector[bot]
+      EVENT: ${{ github.event_name }}
+      SENDER: ${{ github.event.sender.login }}
+      PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+      REVIEW_SHA: ${{ github.event.review.commit_id }}
+      COMMENT: ${{ github.event.comment.body }}
+      WORKFLOW: ${{ inputs.codex-workflow }}
+    steps:
+      - name: Dispatch the verdict run when Codex reviewed the current head
+        run: |
+          set -euo pipefail
+          if [ "$SENDER" != "$CODEX_BOT" ]; then echo "not Codex (${SENDER}); nothing to route"; exit 0; fi
+          if [ "$EVENT" = "pull_request_review" ]; then
+            sha="$REVIEW_SHA"
+          else
+            sha=$(printf '%s' "$COMMENT" | grep -o -m1 -E 'Reviewed commit[^0-9a-f]*[0-9a-f]{7,40}' | grep -o -E '[0-9a-f]{7,40}$' || true)
+          fi
+          if [ -z "$sha" ]; then echo "Codex named no reviewed commit; nothing to route"; exit 0; fi
+          read -r state head ref same < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" \
+            --jq '"\(.state) \(.head.sha) \(.head.ref) \(.head.repo.full_name == env.GITHUB_REPOSITORY)"')
+          if [ "$state" != "open" ] || [ "$same" != "true" ]; then echo "PR #${PR} is ${state} (same-repo: ${same}); nothing to route"; exit 0; fi
+          case "$head" in
+            "$sha"*) ;;
+            *) echo "Codex reviewed ${sha:0:7} but the head is ${head:0:7}: the newer push gets its own review"; exit 0 ;;
+          esac
+          gh workflow run "$WORKFLOW" --repo "$GITHUB_REPOSITORY" --ref "$ref" -f pr="$PR" -f verdict-sha="$head"
+          echo "dispatched ${WORKFLOW} on ${ref} for #${PR} at ${head:0:7}" | tee -a "$GITHUB_STEP_SUMMARY"

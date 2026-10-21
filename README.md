@@ -10,7 +10,7 @@ Each repo keeps only thin stubs under `.github/workflows/` that call the workflo
 |---|---|
 | `.github/workflows/ci.yml` | reusable: `branch-name` (enforces `<type>/<short-description>`) + `verify` (optional toolchain, then the repo's one verify command) |
 | `.github/workflows/claude-review.yml` | reusable: Claude reviews, posts inline findings, submits `AUTO-REVIEW: PASS` or `CHANGES REQUESTED`; a gate step turns that into the job's exit code |
-| `.github/workflows/codex-review.yml` | reusable: Codex second review on `feat/ fix/ refactor/ perf/ build/` branches or PRs labeled `codex-review` / `risk:high`. Default `mode: cloud` = Codex cloud code review from the ChatGPT plan (the job comments `@codex review`, waits for the bot's review, red on any P0/P1 finding). `mode: action` = `openai/codex-action@v1` with an API key. Either way: `CODEX-REVIEW: PASS` or `CHANGES REQUESTED`, red/green |
+| `.github/workflows/codex-review.yml` | reusable: Codex second review on `feat/ fix/ refactor/ perf/ build/` branches or PRs labeled `codex-review` / `risk:high`. Default `mode: cloud` = Codex cloud code review from the ChatGPT plan (the job comments `@codex review` and exits; when the bot answers, `codex-route.yml` dispatches the verdict run, red on any P0/P1 finding; `wait: true` is the old one-runner polling). A docs-only diff passes without asking Codex unless labeled. `mode: action` = `openai/codex-action@v1` with an API key. Either way: `CODEX-REVIEW: PASS` or `CHANGES REQUESTED`, red/green |
 | `.github/workflows/auto-merge.yml` | reusable: squash-merges when every check on the head SHA is green, required checks present, Codex present where the branch rule applies; outputs the PRs it merged |
 | `.github/workflows/review-ledger.yml` | reusable: after a merge, files the PR's non-blocking findings (Codex P2/P3, Claude MEDIUM/LOW) as one `review-ledger` issue. Called by the auto-merge stub's `ledger` job |
 | `.github/workflows/ledger-expiry.yml` | reusable, **not wired into the stub** (expiry is off): daily, would mark `review-ledger` issues `stale` at 14 days and close them as not planned at 30 (`actions/stale`). Called by the auto-merge stub's `expiry` job |
@@ -18,6 +18,7 @@ Each repo keeps only thin stubs under `.github/workflows/` that call the workflo
 | `.github/workflows/claude.yml` | reusable: `@claude` mention handler |
 | `.github/workflows/auto-fix.yml` | reusable, opt-in (`-WithAutoFix`): CI fixes review findings so the session that opened the PR can move on. Red review (with a CHANGES REQUESTED verdict) or red `ci / *`: fixes, max 3 rounds. Green with open non-blocking threads: one pass (fix / drop / defer) inside the gate's fix window. Needs `AUTOFIX_PAT` |
 | `.github/workflows/self-check.yml` | this repo's CI: actionlint on workflows and stubs, stub references resolve, script bodies parse |
+| `.github/workflows/codex-route.yml` | reusable: when Codex answers (its review, or its `Reviewed commit` comment on a clean pass) and the reviewed SHA is still the head, dispatches the caller's codex-review workflow with `pr` + `verdict-sha`. Stub `codex-route.yml` filters to the Codex bot at job level, so other reviews and comments make skipped runs that cost no minutes |
 | `.github/workflows/self-review.yml` | this repo dogfoods `claude-review` + `codex-review` on its own PRs |
 | `.github/workflows/self-gate.yml` | this repo's own gate: merges green PRs that touch nothing under `.github/workflows/**` |
 | `stubs/*.yml` | what a calling repo gets: triggers + `uses:` + inputs, nothing else |
@@ -77,6 +78,7 @@ So each stub passes what its callee declares, by name:
 | `claude-review.yml`, `claude.yml` | `CLAUDE_CODE_OAUTH_TOKEN` |
 | `codex-review.yml` | `CODEX_TRIGGER_PAT` (add `OPENAI_API_KEY` only with `mode: action`) |
 | `auto-fix.yml` | `CLAUDE_CODE_OAUTH_TOKEN`, `AUTOFIX_PAT` |
+| `codex-route.yml` | nothing — it dispatches with `GITHUB_TOKEN` (`actions: write`) |
 | `auto-merge.yml` | nothing — the callee declares no secrets, so it has no `secrets:` block at all |
 
 Naming a secret the repo has not set is safe: it resolves empty, and a callee that declares it `required: false` runs anyway. Naming one the callee does not declare is a hard config error, which is why `auto-merge.yml` must stay bare. `self-review.yml` keeps `inherit` because it calls workflows in this same repo.
@@ -91,7 +93,9 @@ A reusable job shows up as `<stub job id> / <job name>`. The stubs fix the ids, 
 |---|---|
 | `ci / branch-name`, `ci / verify` | `stubs/ci.yml` |
 | `claude / claude-review` | `stubs/claude-review.yml` |
-| `codex / codex-review` | `stubs/codex-review.yml` |
+| `codex / codex-review` | `stubs/codex-review.yml`: the verdict. With `wait: false` it is posted by the dispatched verdict run (or at once for a docs-only diff), so between the ask and Codex's answer the PR has none, and the gate holds it as required-missing |
+| `codex / codex-request`, `codex / codex-guard` | `stubs/codex-review.yml`: the ask (pull_request) and the verdict run's tip check (dispatch); both green or skipped, never the verdict |
+| `route / route` | `stubs/codex-route.yml`, on Codex's review or comment only; not on the PR head |
 | `gate / auto-merge` | `stubs/auto-merge.yml` (excluded from its own evaluation) |
 | `ledger / review-ledger` | `stubs/auto-merge.yml`, after a merge only (never on an open PR's SHA) |
 | `expiry / ledger-expiry` | only if you add the expiry job to a repo's auto-merge stub (off by default) |

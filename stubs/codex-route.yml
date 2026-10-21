@@ -1,0 +1,24 @@
+# Stub. The real workflow lives in sufnevan-sketch/gh-workflows. Pairs with the
+# codex-review stub (`wait: false`): when Codex answers, this dispatches the
+# verdict run, so no runner sits polling while Codex reviews. Keep the name
+# "Codex Route" OUT of the gate's and auto-fix's `workflow_run` lists.
+name: Codex Route
+
+on:
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write
+  pull-requests: read
+
+jobs:
+  route:
+    # Only Codex gets through; every other review or comment is a skipped run (no minutes).
+    if: >-
+      github.event.sender.login == 'chatgpt-codex-connector[bot]' && (
+        github.event_name == 'pull_request_review' ||
+        (github.event.issue.pull_request && contains(github.event.comment.body, 'Reviewed commit')))
+    uses: sufnevan-sketch/gh-workflows/.github/workflows/codex-route.yml@main
