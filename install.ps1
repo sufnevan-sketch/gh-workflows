@@ -17,17 +17,16 @@ param(
   [string] $Verify = 'pwsh ./verify.ps1',
   [string] $WorkingDirectory = '',   # subfolder the setup + verify steps run in (wrapper repos, e.g. web)
   [string] $Ref = 'main',      # gh-workflows ref the stubs pin: main (rolling) or a tag
+  [ValidateSet('auto', 'manual')] [string] $Merge = 'auto',   # recorded in .github/gh-workflows.json
   [switch] $WithAutoFix,       # also install auto-fix.yml + ledger-fix.yml (need AUTOFIX_PAT secret); without it the fix window is 0
   [switch] $Force              # overwrite stubs / PR template that already exist (review-context.md is never overwritten)
 )
 $ErrorActionPreference = 'Stop'
 $src = $PSScriptRoot
+Import-Module (Join-Path $src 'lib/StubConfig.psm1') -Force
+Import-Module (Join-Path $src 'lib/StubRender.psm1') -Force
 $Repo = (Resolve-Path -LiteralPath $Repo).Path
 if (-not (Test-Path -LiteralPath (Join-Path $Repo '.git'))) { throw "$Repo is not a git repo root (no .git). Run from the repo that owns the workflows, not a wrapper." }
-
-# codex-review.yml (wait: false) and codex-route.yml are a pair: without the route, no Codex verdict arrives.
-$stubs = @('ci.yml', 'claude-review.yml', 'codex-review.yml', 'codex-route.yml', 'auto-merge.yml', 'claude.yml')
-if ($WithAutoFix) { $stubs += 'auto-fix.yml', 'ledger-fix.yml' }
 
 $dst = Join-Path $Repo '.github'
 New-Item -ItemType Directory -Force -Path (Join-Path $dst 'workflows') | Out-Null
@@ -35,36 +34,55 @@ $utf8 = [Text.UTF8Encoding]::new($false)
 $copied = @(); $skipped = @()
 
 function Write-Lf([string] $Path, [string] $Text) { [IO.File]::WriteAllText($Path, ($Text -replace "`r`n", "`n"), $utf8) }
-
-foreach ($s in $stubs) {
-  $to = Join-Path $dst "workflows/$s"
-  if ((Test-Path -LiteralPath $to) -and -not $Force) { $skipped += "workflows/$s"; continue }
-  $txt = [IO.File]::ReadAllText((Join-Path $src "stubs/$s"))
-  $txt = $txt -replace '@main\b', "@$Ref"
-  # The fix window is auto-fix.yml's time for its non-blocking pass; with no
-  # auto-fix stub nothing acts in it, so it would only delay merges.
-  $hasAutoFix = $WithAutoFix -or (Test-Path -LiteralPath (Join-Path $dst 'workflows/auto-fix.yml'))
-  if ($s -eq 'auto-merge.yml' -and -not $hasAutoFix) { $txt = $txt -replace 'fix-window-minutes: \d+', 'fix-window-minutes: 0' }
-  if ($s -eq 'ci.yml') {
-    $txt = $txt.Replace('__SETUP__', $Setup).Replace('__VERIFY__', $Verify)
-    if ($WorkingDirectory) { $txt = $txt -replace '(?m)^\s*# working-directory: web.*$', "      working-directory: $WorkingDirectory" }
-  }
-  Write-Lf $to $txt
-  $copied += "workflows/$s"
+function Invoke-Git([string[]] $GitArgs) {
+  $o = & git -C $src @GitArgs
+  if ($LASTEXITCODE -ne 0) { throw "git $($GitArgs -join ' ') failed in $src" }
+  $o
 }
 
-# Opt-in upgrade: an auto-merge stub installed earlier without auto-fix has a 0 window,
-# and the loop above skips existing files. Turn the window on so the pass has time.
-$am = Join-Path $dst 'workflows/auto-merge.yml'
-if ($WithAutoFix -and (Test-Path -LiteralPath $am) -and ($skipped -contains 'workflows/auto-merge.yml')) {
-  $amTxt = [IO.File]::ReadAllText($am)
-  if ($amTxt -match 'fix-window-minutes: 0\b') {
-    $new = $amTxt -replace 'fix-window-minutes: 0\b', 'fix-window-minutes: 15'
-    if ($new.Length -lt 100 -or $new -notmatch 'uses: sufnevan-sketch/gh-workflows') { throw "refusing to rewrite ${am}: unexpected content" }
-    Write-Lf $am $new
-    Write-Host "Updated : workflows/auto-merge.yml fix-window-minutes 0 -> 15 (auto-fix needs the window)"
+# Stubs come from git objects at a resolved SHA (origin/main of this checkout), never the working tree.
+if ($env:GHW_STUB_SHA) { $rev = $env:GHW_STUB_SHA }
+else { Invoke-Git @('fetch', '-q', 'origin') | Out-Null; $rev = 'origin/main' }
+$sha = ([string](Invoke-Git @('rev-parse', '--verify', "$rev^{commit}"))).Trim()
+$stubText = Get-StubsAtSha -RepoRoot $src -Sha $sha
+
+# codex-review.yml (wait: false) and codex-route.yml are a pair: without the route, no Codex verdict arrives.
+# The fix window is auto-fix.yml's time for its non-blocking pass; with no auto-fix stub
+# nothing acts in it, so an existing auto-fix.yml keeps the window on.
+$autoFix = $WithAutoFix.IsPresent -or (Test-Path -LiteralPath (Join-Path $dst 'workflows/auto-fix.yml'))
+$cfgIn = [ordered]@{ ref = $Ref; setup = $Setup; verify = $Verify; merge = $Merge; 'auto-fix' = $autoFix }
+if ($WorkingDirectory) { $cfgIn['working-directory'] = $WorkingDirectory }
+$config = Read-StubConfig ($cfgIn | ConvertTo-Json)
+$tags = [string[]]@((Invoke-Git @('tag', '-l')) | Where-Object { $_ })
+Test-StubConfig -Config $config -StubNames ([string[]]@($stubText.Keys)) -Tags $tags
+$rendered = Invoke-StubRender -Stubs $stubText -Config $config
+
+$lockFiles = [ordered]@{}
+foreach ($key in $rendered.Keys) {
+  $rel = $key -replace '^\.github/', ''
+  $to = Join-Path $Repo $key
+  $exists = Test-Path -LiteralPath $to
+  if ($exists -and -not $Force) {
+    # Opt-in upgrade: an auto-merge stub installed earlier without auto-fix has a 0 window and
+    # would be skipped. Re-render it so the fix pass has time.
+    $onDisk = $utf8.GetString([IO.File]::ReadAllBytes($to))
+    if ($WithAutoFix -and $key -ceq '.github/workflows/auto-merge.yml' -and $onDisk -match 'fix-window-minutes: 0\b') {
+      Write-Lf $to $rendered[$key]
+      Write-Host "Updated : workflows/auto-merge.yml fix-window-minutes 0 -> 15 (auto-fix needs the window)"
+    } else {
+      $skipped += $rel
+    }
+  } else {
+    Write-Lf $to $rendered[$key]
+    $copied += $rel
   }
+  # Record what is actually on disk (a skipped file keeps its own hash).
+  $lockFiles[$key] = Get-TextSha256 ($utf8.GetString([IO.File]::ReadAllBytes($to)))
 }
+
+Write-Lf (Join-Path $dst 'gh-workflows.json') (ConvertTo-StubConfigJson $config)
+Write-Lf (Join-Path $dst 'gh-workflows.lock') (New-StubLock -Sha $sha -Files $lockFiles)
+$copied += 'gh-workflows.json', 'gh-workflows.lock'
 
 $prt = Join-Path $dst 'pull_request_template.md'
 if ((Test-Path -LiteralPath $prt) -and -not $Force) { $skipped += 'pull_request_template.md' }

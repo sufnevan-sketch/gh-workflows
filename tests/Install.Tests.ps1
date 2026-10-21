@@ -1,0 +1,78 @@
+BeforeAll {
+    Import-Module "$PSScriptRoot/../lib/StubConfig.psm1" -Force
+    Import-Module "$PSScriptRoot/../lib/StubRender.psm1" -Force
+    $script:RepoRoot = (Resolve-Path "$PSScriptRoot/..").Path
+    $script:Install = Join-Path $script:RepoRoot 'install.ps1'
+
+    function script:New-Target {
+        $t = Join-Path $TestDrive ('t-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory $t | Out-Null
+        git -C $t init -q
+        $t
+    }
+    # Runs install.ps1 in a child pwsh so its host output stays out of the test log.
+    function script:Invoke-Install([string]$Target, [string[]]$More = @()) {
+        $env:GHW_STUB_SHA = 'HEAD'
+        $out = & pwsh -NoProfile -File $script:Install -Repo $Target @More 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed ($LASTEXITCODE): $out" }
+        $out
+    }
+    function script:Get-Sha([string]$Path) {
+        Get-TextSha256 ([Text.UTF8Encoding]::new($false).GetString([IO.File]::ReadAllBytes($Path)))
+    }
+    $script:Head = (git -C $script:RepoRoot rev-parse HEAD).Trim()
+}
+
+AfterAll { Remove-Item Env:GHW_STUB_SHA -ErrorAction SilentlyContinue }
+
+Describe 'install.ps1' {
+    It 'fresh install writes config, lock and stubs' {
+        $t = New-Target
+        Invoke-Install $t @('-Setup', 'python', '-Verify', 'pytest -q') | Out-Null
+        $cfg = Get-Content (Join-Path $t '.github/gh-workflows.json') -Raw | ConvertFrom-Json
+        $cfg.setup | Should -Be 'python'
+        $cfg.verify | Should -Be 'pytest -q'
+        $lock = Read-StubLock (Get-Content (Join-Path $t '.github/gh-workflows.lock') -Raw)
+        $lock.sha | Should -Be $script:Head
+        $written = Get-ChildItem (Join-Path $t '.github/workflows') -Filter *.yml | ForEach-Object { ".github/workflows/$($_.Name)" } | Sort-Object
+        ($lock.files.Keys | Sort-Object) -join ',' | Should -Be ($written -join ',')
+        foreach ($k in $lock.files.Keys) { $lock.files[$k] | Should -Be (Get-Sha (Join-Path $t $k)) -Because $k }
+    }
+
+    It 'existing stubs are skipped without -Force and the lock records the file on disk' {
+        $t = New-Target
+        New-Item -ItemType Directory -Force (Join-Path $t '.github/workflows') | Out-Null
+        $ci = Join-Path $t '.github/workflows/ci.yml'
+        [IO.File]::WriteAllText($ci, "name: custom`n")
+        Invoke-Install $t | Out-Null
+        [IO.File]::ReadAllText($ci) | Should -Be "name: custom`n"
+        $lock = Read-StubLock (Get-Content (Join-Path $t '.github/gh-workflows.lock') -Raw)
+        $lock.files['.github/workflows/ci.yml'] | Should -Be (Get-TextSha256 "name: custom`n")
+        Invoke-Install $t @('-Force') | Out-Null
+        [IO.File]::ReadAllText($ci) | Should -Not -Be "name: custom`n"
+    }
+
+    It '-Merge manual is recorded in the config' {
+        $t = New-Target
+        Invoke-Install $t @('-Merge', 'manual') | Out-Null
+        (Get-Content (Join-Path $t '.github/gh-workflows.json') -Raw | ConvertFrom-Json).merge | Should -Be 'manual'
+    }
+
+    It 'records auto-fix and upgrades an old auto-merge window to 15' {
+        $t = New-Target
+        Invoke-Install $t | Out-Null
+        $am = Join-Path $t '.github/workflows/auto-merge.yml'
+        [IO.File]::ReadAllText($am) | Should -Match 'fix-window-minutes: 0\b'
+        Invoke-Install $t @('-WithAutoFix') | Out-Null
+        [IO.File]::ReadAllText($am) | Should -Match 'fix-window-minutes: 15\b'
+        (Get-Content (Join-Path $t '.github/gh-workflows.json') -Raw | ConvertFrom-Json).'auto-fix' | Should -BeTrue
+        $lock = Read-StubLock (Get-Content (Join-Path $t '.github/gh-workflows.lock') -Raw)
+        $lock.files['.github/workflows/auto-merge.yml'] | Should -Be (Get-Sha $am)
+        $lock.files.ContainsKey('.github/workflows/auto-fix.yml') | Should -BeTrue
+    }
+
+    It 'rejects a -Ref that is not main or an existing tag' {
+        $t = New-Target
+        { Invoke-Install $t @('-Ref', 'v999') } | Should -Throw
+    }
+}
