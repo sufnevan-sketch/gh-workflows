@@ -11,7 +11,7 @@ Each repo keeps only thin stubs under `.github/workflows/` that call the workflo
 | `.github/workflows/ci.yml` | reusable: `branch-name` (enforces `<type>/<short-description>`) + `verify` (optional toolchain, then the repo's one verify command) |
 | `.github/workflows/claude-review.yml` | reusable: Claude reviews, posts inline findings, submits `AUTO-REVIEW: PASS` or `CHANGES REQUESTED`; a gate step turns that into the job's exit code |
 | `.github/workflows/codex-review.yml` | reusable: Codex second review on `feat/ fix/ refactor/ perf/ build/` branches or PRs labeled `codex-review` / `risk:high`. Default `mode: cloud` = Codex cloud code review from the ChatGPT plan (the job comments `@codex review` and exits; when the bot answers, `codex-route.yml` dispatches the verdict run, red on any P0/P1 finding; `wait: true` is the old one-runner polling). A docs-only diff passes without asking Codex unless labeled. `mode: action` = `openai/codex-action@v1` with an API key. Either way: `CODEX-REVIEW: PASS` or `CHANGES REQUESTED`, red/green |
-| `.github/workflows/auto-merge.yml` | reusable: squash-merges when every check on the head SHA is green, required checks present, Codex present where the branch rule applies; outputs the PRs it merged |
+| `.github/workflows/auto-merge.yml` | reusable: squash-merges when every check on the head SHA is green, required checks present, Codex present where the branch rule applies; refuses (human merge) any PR touching `.github/workflows/**`, `.github/gh-workflows.json` or `.github/gh-workflows.lock`; outputs the PRs it merged |
 | `.github/workflows/review-ledger.yml` | reusable: after a merge, files the PR's non-blocking findings (Codex P2/P3, Claude MEDIUM/LOW) as one `review-ledger` issue. Called by the auto-merge stub's `ledger` job |
 | `.github/workflows/ledger-expiry.yml` | reusable, **not wired into the stub** (expiry is off): daily, would mark `review-ledger` issues `stale` at 14 days and close them as not planned at 30 (`actions/stale`). Called by the auto-merge stub's `expiry` job |
 | `.github/workflows/ledger-fix.yml` | reusable, opt-in: label a `review-ledger` issue `auto-fix` and Claude opens one small PR per finding (`fix/ledger-<n>-<k>`, `Refs #<n> (ledger items <k>)`; same-file findings share one), at most `max-prs` (5) per run; needs `AUTOFIX_PAT` |
@@ -25,6 +25,7 @@ Each repo keeps only thin stubs under `.github/workflows/` that call the workflo
 | `stubs/review-context.md` | starter for the per-repo file **Claude** reads |
 | `stubs/pull_request_template.md` | PR body written for a reader who does not read code |
 | `install.ps1` | copies the stubs into a repo, fills the ci inputs, warns if the repo has no `AGENTS.md` |
+| `sync.ps1` | syncs the stubs into every opted-in repo under the given owners: one PR per repo, merged when `ci / *` is green (see Stub sync) |
 | `ledger-stats.ps1` | read-only report: per-finding fix rates by severity tier from `review-outcomes` comments and ledger checkboxes, plus the thresholds below |
 | `set-secrets.ps1` | pushes named secrets from a gitignored env file to the repo with `gh secret set --body`; values never printed |
 
@@ -84,6 +85,41 @@ So each stub passes what its callee declares, by name:
 Naming a secret the repo has not set is safe: it resolves empty, and a callee that declares it `required: false` runs anyway. Naming one the callee does not declare is a hard config error, which is why `auto-merge.yml` must stay bare. `self-review.yml` keeps `inherit` because it calls workflows in this same repo.
 
 Per-repo variance is exactly: the ci stub's `setup` / `verify` (and `working-directory` for wrapper repos), `review-context.md` for Claude, and `AGENTS.md` for Codex cloud mode, both carrying the same contracts. Everything else is here.
+
+## Stub sync
+
+Stubs pin `@main`, so a change to a reusable workflow reaches every repo at once, but a change to a **stub** (a new input, a new stub, a removed one) used to mean re-running `install.ps1` repo by repo. `sync.ps1` does that for every repo that opted in: it renders the stubs for each repo's own config and opens one PR per repo that needs it, then merges the PRs whose `ci / *` checks pass.
+
+**What it owns.** Only the stub files the renderer produces (`.github/workflows/<stub>.yml` for the stubs in `stubs/` at the rendered gh-workflows commit) plus any the repo's lock lists from an earlier render. It deletes an owned stub only when the lock lists it, it still matches its lock hash, and the new render no longer produces it. Every other workflow file, `review-context.md`, `pull_request_template.md` and `AGENTS.md` are never touched. Its writes go through the GitHub API to one standing branch per repo, `chore/gh-workflows-sync`.
+
+**Two files per repo**, both under `.github/`:
+
+- `gh-workflows.json`, the repo's choices. `ref` (`main` or an existing gh-workflows tag; default `main`), `setup`, `verify`, `working-directory`, `auto-fix` (bool), `stubs` (the stub set, for repos that deviate from the default, e.g. review-only), `merge` (`auto` or `manual`), `with` (per-stub inputs, keyed `<stub>.yml/<jobId>`, e.g. `{"auto-merge.yml/gate": {"delete-branch": false}}`), `secrets` (extra named secrets per stub job, e.g. `OPENAI_API_KEY` for codex `mode: action`), and `ledger-expiry` (bool). Every string is one line; unknown fields are an error, so the repo's sync fails rather than rendering half a config.
+- `gh-workflows.lock`, written only by tooling: the gh-workflows commit the stubs were rendered from (the last commit touching `stubs/` at or before `ref`, so a docs-only commit is not a new render) and a sha256 per owned stub.
+
+The gate refuses any PR that touches either file, like a workflow file, so both change only by a hand merge or by the sync's own merge. A config change is a PR you merge; the sync PR that renders it afterwards merges itself. The sync deletes `chore/gh-workflows-sync` after it merges the PR or closes it as superseded, and a branch still at the head of the newest sync PR, merged, counts as landed rather than as someone else's.
+
+**Adoption.** A repo installed by the current `install.ps1` already has both files. A repo installed earlier has stubs but neither file: `pwsh install.ps1 -Repo <repo-root> -Adopt` infers the config from the installed stubs and writes the config and lock without changing a stub. Commit them on a `chore/` branch; the PR is a hand merge (the gate refuses it). A stub that does not match the render of the inferred config is locked at the rendered hash, so the first sync reports it as drift instead of overwriting it.
+
+**When a sync PR waits for you** (outcome `held`; the reason is on the repo's output line, and also in the PR body under "Waits for a human merge because:" when the sync opened or updated the PR):
+
+- `not adopted`: the repo has a config but no lock.
+- `drift: <stub> differs from lock` / `missing` / `exists but is not in lock`: a stub was edited by hand. There is no "keep my edit" path; make it a config field or drop it.
+- `merge: manual`: the config says so.
+- `sync branch changed by someone else`: `chore/gh-workflows-sync` holds anything other than the sync's own render (judged by content, since every writer uses the same login), e.g. a commit pushed to it. A config change merged while its PR is open does not count: the branch is judged against the config at its own head, and the next run pushes the new render over it. Look at what changed: merge the PR by hand if you want it (the next run then treats the branch as landed), or delete the branch and the next run starts over.
+- `closed by hand`: you closed the sync PR for this exact render; it stays closed until gh-workflows changes the render again.
+- `CI red`: `ci / branch-name` or `ci / verify` failed on the pushed commit.
+
+**Run it** from this checkout, with the machine's `gh` login (needs `repo` and `workflow` scope, and gh >= 2.48 for `--paginate --slurp`):
+
+```powershell
+pwsh -NoProfile -File sync.ps1 -Owners <owner>,<owner> -WhatIf   # report only, writes nothing
+pwsh -NoProfile -File sync.ps1 -Owners <owner>,<owner>           # push, open PRs, merge the green ones
+```
+
+It fetches `origin` and runs from a detached `origin/main` in `.worktrees/sync-runner`, so neither this checkout's branch nor its working tree affects what is rendered; it refuses to run if that worktree has local changes. Pass 1 handles every repo; pass 2 waits once for all PRs that may merge themselves, polling every 20 s for at most `-WaitSeconds` (default 420, which keeps a run inside a 10-minute tool call), and squash-merges each PR whose two `ci / *` checks are green on the exact commit the sync pushed. A PR still running at the cap is left for the next run. Output is one line per repo, `<repo>  <outcome>  <reason>` with outcome `current`, `merged`, `pending`, `held` or `failed` (`-WhatIf` prints `would-push` / `would-merge` instead of acting and counts them as pending), then `SUMMARY merged=N current=N pending=N held=N failed=N`.
+
+Exit codes: `0` nothing held or failed; `1` at least one repo held or failed; `2` the `gh` login failed (the run stops at once), every repo failed with the same message (printed once, at the top), or the runner worktree has local changes.
 
 ## Check names
 
@@ -194,7 +230,7 @@ Why `workflow_run` and not `check_suite` for the gate: GitHub does not fire `che
 Open it ready (never draft) and move on: CI reviews, `auto-fix.yml` fixes, the gate merges, the ledger keeps what is left. Start independent work in a new worktree from `origin/main`; work that needs the open PR branches from its head (a stacked PR) or waits for the merge. Look at a PR only when something asks for a human:
 
 - `🤖 auto-fix stopped after 3 rounds` comment: the reviews are still red; fix by hand or close.
-- `BLOCKED` title, a change under `.github/workflows/**`, or a fork PR: merge by hand.
+- `BLOCKED` title, a change under `.github/workflows/**` or to `.github/gh-workflows.json` / `.github/gh-workflows.lock`, or a fork PR: merge by hand.
 - The gate did not merge: read the `gate / auto-merge` run log (every skip is `#<n>: <reason>, skip`); `gh workflow run auto-merge` re-evaluates every open PR.
 
 ```bash
@@ -215,7 +251,7 @@ gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$
 - `BLOCKED` at the start of the PR title or body: the gate skips it; merge by hand. Reserved for changes that cannot be undone after merge (the PR template's "How to undo" line says so).
 - Draft PRs: not reviewed, not merged, until marked ready. Open PRs ready; the fix window, not a draft, is the time to fix non-blocking findings.
 - Fix window: up to `fix-window-minutes` after the last check while non-blocking bot threads are open (see above).
-- Any PR that changes `.github/workflows/**`: human merge.
+- Any PR that changes `.github/workflows/**`, `.github/gh-workflows.json` or `.github/gh-workflows.lock`: human merge.
 - Head branch under `skip-branch-prefixes` (`wo/`): the solo-harness `ship.ps1` waits on the same checks and merges these itself; the gate stays out to avoid a double-merge race.
 - A human `CHANGES_REQUESTED` review blocks until that reviewer approves or dismisses.
 - Kill switch: delete the repo's `auto-merge.yml` stub.
