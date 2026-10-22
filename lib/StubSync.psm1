@@ -74,7 +74,7 @@ function Get-SyncAction {
     $autoMerge = (-not $drift) -and $Merge -ceq 'auto'
     if ($Merge -cne 'auto') { $reasons.Add('merge: manual') }
 
-    $branchAtRender = $null -ne $Branch -and $Branch.IsOwn -and $Branch.RenderSha -eq $RenderSha
+    $branchAtRender = $null -ne $Branch -and $Branch.IsOwn -and $Branch.RenderSha -ceq $RenderSha
     if ($branchAtRender) {
         if ($null -ne $Pr -and $Pr.State -eq 'open') {
             $action = if ($autoMerge) { 'wait' } else { 'hold' }

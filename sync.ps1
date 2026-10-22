@@ -22,11 +22,14 @@ function Invoke-Git([string[]]$GitArgs) {
     if ($LASTEXITCODE -ne 0) { Write-Output "git $($GitArgs -join ' ') failed"; exit 2 }
 }
 
-Invoke-Git @('-C', $PSScriptRoot, 'fetch', '-q', '--tags', 'origin')
+# --force: a tag moved upstream (a re-pinned ref) must win over the stale local copy.
+Invoke-Git @('-C', $PSScriptRoot, 'fetch', '-q', '--force', '--tags', 'origin')
 if (-not (Test-Path -LiteralPath (Join-Path $runner '.git'))) {
     Invoke-Git @('-C', $PSScriptRoot, 'worktree', 'add', '-q', '--detach', $runner, 'origin/main')
 }
-if (& git -C $runner status --porcelain) {
+$dirty = & git -C $runner status --porcelain
+if ($LASTEXITCODE -ne 0) { Write-Output "git status failed in $runner"; exit 2 }
+if ($dirty) {
     Write-Output "runner worktree $runner has local changes; clean it by hand, then rerun"
     exit 2
 }

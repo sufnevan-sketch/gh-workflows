@@ -57,14 +57,20 @@ function Get-Hashes($Files) {
 # The branch is the sync's own when it differs from the default branch only in owned files
 # and the lock, and those equal the render named by its own lock (rendered with the default
 # branch's config). Ownership is judged by content because every writer is the same login.
-function Get-BranchView($State, $Repo, $Config, $Rendered, $Lock) {
+function Get-BranchView($State, $Repo, $Config, $Rendered, $Lock, $Pr) {
     $bs = Get-SyncBranchState -Repo $Repo -DefaultBranch $State.DefaultBranch
     if ($null -eq $bs) { return $null }
+    # A branch still at the head of the newest sync PR, which was merged, is stale: its
+    # content landed (the branch survives a merge the sync could not clean up). Treat it as
+    # absent so the next push force-updates it instead of holding it as someone else's.
+    if ($null -ne $Pr -and $Pr.Merged -and [string]$Pr.HeadSha -ceq [string]$bs.HeadSha) { return $null }
     $renderSha = $null
     $branchLock = $null
     if ($bs.LockText) {
         try { $branchLock = Read-StubLock $bs.LockText; $renderSha = $branchLock.sha } catch { $renderSha = $null }
     }
+    # Only a full commit id is rendered; anything else (e.g. 'HEAD', a branch name) is not ours.
+    if ($renderSha -and $renderSha -cnotmatch '^[0-9a-f]{40}\z') { $renderSha = $null }
     $view = [pscustomobject]@{ HeadSha = $bs.HeadSha; IsOwn = $false; RenderSha = $renderSha }
     if (-not $renderSha) { return $view }
 
@@ -126,9 +132,9 @@ function Add-Result([string]$Repo, [string]$Outcome, [string]$Reason) {
     $results.Add([pscustomobject]@{ Repo = $Repo; Outcome = $Outcome; Reason = (Get-OneLine $Reason) })
 }
 
-function Write-Report([string]$Top) {
+function Write-Report([string]$Top, [switch]$NoLines) {
     if ($Top) { Write-Output $Top }
-    else {
+    if (-not $NoLines) {
         foreach ($r in $results) { Write-Output ("{0}  {1}  {2}" -f $r.Repo, $r.Outcome, $r.Reason).TrimEnd() }
     }
     $count = { param($o) @($results | Where-Object { $_.Outcome -ceq $o }).Count }
@@ -137,16 +143,28 @@ function Write-Report([string]$Top) {
 }
 
 function Exit-Auth($Exception) {
+    # The top line says why; the repos already decided still get their lines.
     Write-Report ("gh auth failed, run aborted: " + (Get-OneLine $Exception.Message))
     exit 2
 }
+
+# Deletes the sync branch after its PR merged or was closed as superseded. Returns a note
+# for the repo line when the delete failed; an auth failure still aborts the run.
+function Remove-BranchNote([string]$Repo) {
+    try { Remove-SyncBranch -Repo $Repo; '' } catch {
+        if (Test-AuthError $_.Exception) { Exit-Auth $_.Exception }
+        "; branch not deleted: $($_.Exception.Message)"
+    }
+}
+
+$runStart = & $Now
 
 # ---- Pass 1 -------------------------------------------------------------------------
 try {
     $repos = @(Get-SyncRepoList -Owners $Owners)
 } catch {
     if (Test-AuthError $_.Exception) { Exit-Auth $_.Exception }
-    Write-Report ("listing repos failed: " + (Get-OneLine $_.Exception.Message))
+    Write-Report ("listing repos failed: " + (Get-OneLine $_.Exception.Message)) -NoLines
     exit 2
 }
 
@@ -169,8 +187,8 @@ foreach ($r in $repos) {
         if ($null -ne $lock) { foreach ($k in $lock.files.Keys) { if (-not $paths.Contains($k)) { $paths.Add($k) } } }
         $repoFiles = Get-RepoFiles -Repo $repo -Ref $state.DefaultSha -Paths $paths.ToArray()
 
-        $branch = Get-BranchView $state $repo $config $rendered $lock
         $pr = Get-SyncPr -Repo $repo
+        $branch = Get-BranchView $state $repo $config $rendered $lock $pr
         $action = Get-SyncAction -Rendered $rendered -RenderSha $sha -RepoFiles $repoFiles -Lock $lock -Merge $config.merge -Branch $branch -Pr $pr
         $reasons = @($action.Reasons) -join '; '
         $openPr = $null -ne $pr -and $pr.State -eq 'open'
@@ -181,7 +199,7 @@ foreach ($r in $repos) {
                     if ($WhatIf) { Add-Result $repo 'current' "would close superseded PR #$($pr.Number)" }
                     else {
                         Close-SyncPr -Repo $repo -Number $pr.Number -Comment "Superseded: stubs already match gh-workflows $(Get-Short $sha)."
-                        Add-Result $repo 'current' "closed superseded PR #$($pr.Number)"
+                        Add-Result $repo 'current' ("closed superseded PR #$($pr.Number)" + (Remove-BranchNote $repo))
                     }
                 } else { Add-Result $repo 'current' '' }
             }
@@ -222,7 +240,7 @@ foreach ($r in $repos) {
 
 # ---- Pass 2: one shared CI wait -------------------------------------------------------
 if ($queue.Count -gt 0) {
-    $deadline = (& $Now).AddSeconds($WaitSeconds)
+    $deadline = $runStart.AddSeconds($WaitSeconds)   # the cap covers the whole run, pass 1 included
     $pendingQ = [System.Collections.Generic.List[object]]::new($queue)
     while ($true) {
         foreach ($q in @($pendingQ)) {
@@ -231,7 +249,7 @@ if ($queue.Count -gt 0) {
                 if ($ci.BranchName -eq 'success' -and $ci.Verify -eq 'success') {
                     # The SHA makes GitHub refuse the merge if the PR head moved since the push.
                     Merge-SyncPr -Repo $q.Repo -Number $q.Number -Sha $q.Sha
-                    Add-Result $q.Repo 'merged' "PR #$($q.Number)"
+                    Add-Result $q.Repo 'merged' ("PR #$($q.Number)" + (Remove-BranchNote $q.Repo))
                     [void]$pendingQ.Remove($q)
                 } elseif ($ci.BranchName -eq 'failure' -or $ci.Verify -eq 'failure') {
                     Add-Result $q.Repo 'held' "CI red on PR #$($q.Number) (branch-name $($ci.BranchName), verify $($ci.Verify))"
@@ -259,7 +277,7 @@ $results.Clear(); foreach ($x in $sorted) { $results.Add($x) }
 
 $failed = @($results | Where-Object { $_.Outcome -ceq 'failed' })
 if ($results.Count -gt 0 -and $failed.Count -eq $results.Count -and @($failed.Reason | Select-Object -Unique).Count -eq 1) {
-    Write-Report ("every repo failed: " + $failed[0].Reason)
+    Write-Report ("every repo failed: " + $failed[0].Reason) -NoLines
     exit 2
 }
 Write-Report ''

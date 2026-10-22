@@ -43,7 +43,7 @@ BeforeAll {
         foreach ($p in $Paths) { if ($Source.Contains($p)) { $o[$p] = $Source[$p] } }
         $o
     }
-    function script:Invoke-Sync([switch]$WhatIf, [int]$WaitSeconds = 420) {
+    function script:Invoke-Sync([switch]$WhatIf, [int]$WaitSeconds = 420, [scriptblock]$Now = { $global:ST_T0.AddSeconds($global:ST_Slept) }) {
         $global:ST_Slept = 0
         $global:ST_T0 = [datetime]'2026-10-21T12:00:00'
         $a = @{
@@ -51,7 +51,7 @@ BeforeAll {
             GhwRoot     = $global:ST_Root
             WaitSeconds = $WaitSeconds
             Sleep       = { param($s) $global:ST_Slept += $s }
-            Now         = { $global:ST_T0.AddSeconds($global:ST_Slept) }
+            Now         = $Now
         }
         if ($WhatIf) { $a['WhatIf'] = $true }
         $global:ST_Out = @(& $global:ST_Runner @a)
@@ -81,6 +81,7 @@ Describe 'Invoke-StubSync' {
         Mock Set-SyncPr { 7 }
         Mock Close-SyncPr { }
         Mock Merge-SyncPr { }
+        Mock Remove-SyncBranch { }
         Mock Get-CiState { [pscustomobject]@{ BranchName = 'success'; Verify = 'success' } }
     }
 
@@ -209,6 +210,7 @@ Describe 'Invoke-StubSync' {
         $global:ST_Code | Should -Be 0
         Should -Invoke Close-SyncPr -Times 2 -Exactly -ParameterFilter { $Number -eq 4 -and $Comment -ceq "Superseded: stubs already match gh-workflows $($global:ST_Head.Substring(0, 7))." }
         Should -Invoke Publish-SyncCommit -Times 0 -Exactly
+        Should -Invoke Remove-SyncBranch -Times 2 -Exactly
         Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+current\b'
     }
 
@@ -273,6 +275,90 @@ Describe 'Invoke-StubSync' {
             Invoke-Sync
             Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+held\s+sync branch changed by someone else'
         }
+
+        It 'a branch lock SHA that is not a 40-hex commit id is not own' {
+            # 'HEAD' would resolve and render identically; it must be refused before rendering.
+            $global:ST_HeadLock = New-StubLock -Sha 'HEAD' -Files (Get-Hashes $global:ST_Rendered)
+            $global:ST_BranchFiles[$global:ST_LockPath] = $global:ST_HeadLock
+            Mock Get-SyncBranchState {
+                [pscustomobject]@{ HeadSha = $global:ST_BranchHead; ChangedPaths = [string[]]@($global:ST_StaleKey, $global:ST_LockPath); LockText = $global:ST_HeadLock }
+            }
+            Invoke-Sync
+            Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+held\s+sync branch changed by someone else'
+        }
+
+        It 'a stale branch whose PR was merged is not held as foreign' {
+            Mock Get-SyncBranchState {
+                [pscustomobject]@{ HeadSha = $global:ST_BranchHead; ChangedPaths = [string[]]@($global:ST_StaleKey, $global:ST_LockPath, 'README.md'); LockText = $global:ST_RenderLock }
+            }
+            Mock Get-SyncPr { [pscustomobject]@{ Number = 6; State = 'closed'; Merged = $true; HeadSha = $global:ST_BranchHead; LockSha = $global:ST_OldSha } }
+            Invoke-Sync
+            $global:ST_Code | Should -Be 0
+            Should -Invoke Publish-SyncCommit -Times 1 -Exactly
+            Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+merged\b'
+        }
+
+        It 'a branch that moved past its merged PR is still judged by content' {
+            Mock Get-SyncBranchState {
+                [pscustomobject]@{ HeadSha = $global:ST_BranchHead; ChangedPaths = [string[]]@($global:ST_StaleKey, $global:ST_LockPath, 'README.md'); LockText = $global:ST_RenderLock }
+            }
+            Mock Get-SyncPr { [pscustomobject]@{ Number = 6; State = 'closed'; Merged = $true; HeadSha = 'c' * 40; LockSha = $global:ST_OldSha } }
+            Invoke-Sync
+            Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+held\s+sync branch changed by someone else'
+            Should -Invoke Publish-SyncCommit -Times 0 -Exactly
+        }
+
+        It 'WhatIf on the wait path writes nothing' {
+            Mock Get-SyncPr { [pscustomobject]@{ Number = 5; State = 'open'; Merged = $false; HeadSha = $global:ST_BranchHead; LockSha = $global:ST_Head } }
+            Invoke-Sync -WhatIf
+            Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+would-merge\b'
+            foreach ($w in 'Publish-SyncCommit', 'Set-SyncPr', 'Close-SyncPr', 'Merge-SyncPr', 'Remove-SyncBranch', 'Get-CiState') {
+                Should -Invoke $w -Times 0 -Exactly
+            }
+        }
+    }
+
+    It 'merge deletes the sync branch' {
+        Invoke-Sync
+        Should -Invoke Remove-SyncBranch -Times 1 -Exactly -ParameterFilter { $Repo -eq 'octo-org/demo' }
+        Should -Invoke Remove-SyncBranch -Times 1 -Exactly -ParameterFilter { $Repo -eq 'octo-org/other' }
+    }
+
+    It 'a failed branch delete after a merge still reports merged' {
+        Mock Remove-SyncBranch { throw [GhApiException]::new('gh: Server Error (HTTP 502)', 502) }
+        Invoke-Sync
+        $global:ST_Code | Should -Be 0
+        Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+merged\s+.*branch not deleted.*502'
+    }
+
+    It 'WhatIf on current with an open PR writes nothing' {
+        Mock Get-RepoFiles { if ($Ref -eq $global:ST_DefaultSha) { Select-Files $global:ST_Rendered $Paths } else { @{} } }
+        Mock Get-SyncRepoState { New-State -LockText $global:ST_RenderLock }
+        Mock Get-SyncPr { [pscustomobject]@{ Number = 4; State = 'open'; Merged = $false; HeadSha = 'e' * 40; LockSha = $global:ST_OldSha } }
+        Invoke-Sync -WhatIf
+        Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+current\s+would close superseded PR #4'
+        foreach ($w in 'Publish-SyncCommit', 'Set-SyncPr', 'Close-SyncPr', 'Merge-SyncPr', 'Remove-SyncBranch') {
+            Should -Invoke $w -Times 0 -Exactly
+        }
+    }
+
+    It 'an auth abort prints the repos already decided' {
+        Mock Get-SyncRepoState -ParameterFilter { $Repo -eq 'octo-org/demo' } { New-State -LockText $null }
+        Mock Get-SyncRepoState -ParameterFilter { $Repo -eq 'octo-org/other' } { throw [GhAuthException]::new('token revoked (HTTP 401)', 401) }
+        Invoke-Sync
+        $global:ST_Code | Should -Be 2
+        $global:ST_Out[0] | Should -Match 'token revoked'
+        Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+held\s+not adopted'
+    }
+
+    It 'the CI wait cap counts from the start of the run' {
+        $global:ST_NowCalls = 0
+        Mock Get-CiState { [pscustomobject]@{ BranchName = 'pending'; Verify = 'pending' } }
+        # First clock read is the run start; every later read is 500 s on (pass 1 was slow).
+        Invoke-Sync -WaitSeconds 420 -Now { $global:ST_NowCalls++; if ($global:ST_NowCalls -eq 1) { $global:ST_T0 } else { $global:ST_T0.AddSeconds(500) } }
+        $global:ST_Slept | Should -Be 0
+        Should -Invoke Get-CiState -Times 2 -Exactly
+        Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+pending\b'
     }
 
     It 'CI red holds the PR' {

@@ -188,6 +188,13 @@ Describe 'Get-SyncAction' {
         $r.BranchCurrent | Should -BeFalse
     }
 
+    It 'branch render SHA compares case-sensitively' {
+        $br = [pscustomobject]@{ HeadSha = 'bh'; IsOwn = $true; RenderSha = 'NEW-RENDER' }
+        $r = Invoke-Sync -Rendered $NewRendered -RepoFiles $OldFiles -Lock $GoodLock -Branch $br
+        $r.Action | Should -Be 'push'
+        $r.BranchCurrent | Should -BeFalse
+    }
+
     It 'own branch at this render with no PR pushes with BranchCurrent true' {
         $br = [pscustomobject]@{ HeadSha = 'bh'; IsOwn = $true; RenderSha = 'new-render' }
         $r = Invoke-Sync -Rendered $NewRendered -RepoFiles $OldFiles -Lock $GoodLock -Branch $br

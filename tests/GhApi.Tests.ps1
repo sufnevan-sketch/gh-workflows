@@ -339,6 +339,28 @@ Describe 'Merge-SyncPr' {
     }
 }
 
+Describe 'Remove-SyncBranch' {
+    It 'deletes the sync branch ref' {
+        Mock Invoke-GhApi -ModuleName GhApi { $null }
+        Remove-SyncBranch -Repo 'octo-org/demo'
+        Should -Invoke Invoke-GhApi -ModuleName GhApi -Exactly 1 -ParameterFilter {
+            $Method -eq 'DELETE' -and $Path -eq 'repos/octo-org/demo/git/refs/heads/chore/gh-workflows-sync'
+        }
+    }
+    It 'treats an already-gone branch (404) as done' {
+        Mock Invoke-GhApi -ModuleName GhApi { throw (NotFound) }
+        { Remove-SyncBranch -Repo 'octo-org/demo' } | Should -Not -Throw
+    }
+    It 'treats 422 Reference does not exist as done' {
+        Mock Invoke-GhApi -ModuleName GhApi { throw [GhApiException]::new('gh api DELETE x failed: gh: Reference does not exist (HTTP 422)', 422) }
+        { Remove-SyncBranch -Repo 'octo-org/demo' } | Should -Not -Throw
+    }
+    It 'rethrows other errors' {
+        Mock Invoke-GhApi -ModuleName GhApi { throw [GhApiException]::new('gh: Validation Failed (HTTP 422)', 422) }
+        { Remove-SyncBranch -Repo 'octo-org/demo' } | Should -Throw '*Validation Failed*'
+    }
+}
+
 Describe 'Invoke-GhApi error mapping' {
     It '401 surfaces as GhAuthException' {
         Mock Invoke-GhProcess -ModuleName GhApi { [pscustomobject]@{ ExitCode = 1; Stdout = ''; Stderr = "gh: Bad credentials (HTTP 401)`n" } }

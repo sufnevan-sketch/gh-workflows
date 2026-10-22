@@ -292,4 +292,17 @@ function Merge-SyncPr {
     $null = Invoke-GhApi -Method PUT -Path "repos/$Repo/pulls/$Number/merge" -Body @{ merge_method = 'squash'; sha = $Sha }
 }
 
-Export-ModuleMember -Function Invoke-GhApi, Get-SyncRepoList, Get-SyncRepoState, Get-RepoFiles, Get-SyncBranchState, Get-SyncPr, Publish-SyncCommit, Set-SyncPr, Close-SyncPr, Get-CiState, Merge-SyncPr
+function Remove-SyncBranch {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Repo)
+    try {
+        $null = Invoke-GhApi -Method DELETE -Path "repos/$Repo/git/refs/heads/$script:SyncBranch"
+    } catch {
+        # Already gone (GitHub auto-delete, or a hand delete): 404, or 422 "Reference does not exist".
+        $status = Get-StatusOf $_.Exception
+        if ($status -eq 404 -or ($status -eq 422 -and $_.Exception.Message -match "Reference does not exist")) { return }
+        throw
+    }
+}
+
+Export-ModuleMember -Function Invoke-GhApi, Get-SyncRepoList, Get-SyncRepoState, Get-RepoFiles, Get-SyncBranchState, Get-SyncPr, Publish-SyncCommit, Set-SyncPr, Close-SyncPr, Get-CiState, Merge-SyncPr, Remove-SyncBranch
