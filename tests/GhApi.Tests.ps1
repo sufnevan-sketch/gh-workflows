@@ -79,12 +79,42 @@ Describe 'Get-SyncRepoList' {
         $null = Get-SyncRepoList -Owners 'octo-user'
         Should -Invoke Invoke-GhApi -ModuleName GhApi -ParameterFilter { $Path -like 'users/octo-user/repos*' }
     }
-    It 'throws on a non-404 error' {
+    It 'a non-404 error probing one repo returns it as a failed entry and keeps listing' {
         Mock Invoke-GhApi -ModuleName GhApi {
             switch -Regex ($Path) {
                 '^user$' { [pscustomobject]@{ login = 'octo-self' } }
-                '^users/' { [pscustomobject]@{ type = 'User' } }
+                '^users/[^/]+$' { [pscustomobject]@{ type = 'User' } }
+                '/repos' {
+                    @([pscustomobject]@{ full_name = 'octo-user/demo'; default_branch = 'main'; archived = $false },
+                        [pscustomobject]@{ full_name = 'octo-user/ok'; default_branch = 'main'; archived = $false })
+                }
+                'repos/octo-user/ok/contents' { Content '{}' }
+                default { throw [GhApiException]::new('boom (HTTP 500)', 500) }
+            }
+        }
+        $l = @(Get-SyncRepoList -Owners 'octo-user')
+        $l.Count | Should -Be 2
+        $l[0].FullName | Should -Be 'octo-user/demo'
+        $l[0].Error | Should -Match 'boom \(HTTP 500\)'
+        $l[1].FullName | Should -Be 'octo-user/ok'
+        $l[1].Error | Should -BeNullOrEmpty
+    }
+    It 'an auth error probing a repo still throws' {
+        Mock Invoke-GhApi -ModuleName GhApi {
+            switch -Regex ($Path) {
+                '^user$' { [pscustomobject]@{ login = 'octo-self' } }
+                '^users/[^/]+$' { [pscustomobject]@{ type = 'User' } }
                 '/repos' { @([pscustomobject]@{ full_name = 'octo-user/demo'; default_branch = 'main'; archived = $false }) }
+                default { throw [GhAuthException]::new('token revoked (HTTP 401)', 401) }
+            }
+        }
+        { Get-SyncRepoList -Owners 'octo-user' } | Should -Throw -ExceptionType ([GhAuthException])
+    }
+    It 'an error listing an owner''s repos still throws' {
+        Mock Invoke-GhApi -ModuleName GhApi {
+            switch -Regex ($Path) {
+                '^user$' { [pscustomobject]@{ login = 'octo-self' } }
+                '^users/[^/]+$' { [pscustomobject]@{ type = 'User' } }
                 default { throw [GhApiException]::new('boom (HTTP 500)', 500) }
             }
         }
@@ -185,6 +215,7 @@ Describe 'Publish-SyncCommit' {
             switch -Regex ("$Method $Path") {
                 'POST .*git/trees' { [pscustomobject]@{ sha = 'tree1' } }
                 'POST .*git/commits' { [pscustomobject]@{ sha = 'commit1' } }
+                'GET .*git/commits/def1$' { [pscustomobject]@{ sha = 'def1'; tree = [pscustomobject]@{ sha = 'deftree1' } } }
                 default { [pscustomobject]@{} }
             }
         }
@@ -192,7 +223,9 @@ Describe 'Publish-SyncCommit' {
         $sha = Publish-SyncCommit -Repo 'octo-org/demo' -DefaultSha 'def1' -Files $files -Deletes @('.github/workflows/old.yml') -Message 'msg'
         $sha | Should -Be 'commit1'
         $tree = $script:calls | Where-Object { $_.Path -like '*git/trees' }
-        $tree.Body.base_tree | Should -Be 'def1'
+        # base_tree is a TREE sha: the default commit's tree, not the commit itself.
+        $tree.Body.base_tree | Should -Be 'deftree1'
+        Should -Invoke Invoke-GhApi -ModuleName GhApi -ParameterFilter { $Method -eq 'GET' -and $Path -eq 'repos/octo-org/demo/git/commits/def1' }
         $tree.Body.tree.Count | Should -Be 3
         $del = $tree.Body.tree | Where-Object { $_.path -eq '.github/workflows/old.yml' }
         $del.ContainsKey('sha') | Should -BeTrue
@@ -214,6 +247,7 @@ Describe 'Publish-SyncCommit' {
             switch -Regex ("$Method $Path") {
                 'POST .*git/trees' { [pscustomobject]@{ sha = 'tree1' } }
                 'POST .*git/commits' { [pscustomobject]@{ sha = 'commit1' } }
+                'GET .*git/commits/def1$' { [pscustomobject]@{ sha = 'def1'; tree = [pscustomobject]@{ sha = 'deftree1' } } }
                 'GET .*git/ref/heads' { throw (NotFound) }
                 default { [pscustomobject]@{} }
             }
@@ -405,5 +439,27 @@ Describe 'Invoke-GhApi error mapping' {
         $r = @(Invoke-GhApi -Method GET -Path 'x' -Paginate)
         $r.Count | Should -Be 1
         $r[0].name | Should -Be 'a'
+    }
+}
+
+Describe 'Invoke-GhProcess timeout' {
+    It 'kills a hung process and throws GhApiException with Status 0' {
+        $exe = (Get-Process -Id $PID).Path
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $err = $null
+        try {
+            InModuleScope GhApi -Parameters @{ Exe = $exe } {
+                param($Exe)
+                Invoke-GhProcess -FileName $Exe -TimeoutMs 1000 -Arguments @('-NoProfile', '-Command', 'Start-Sleep -Seconds 60')
+            }
+        } catch { $err = $_.Exception }
+        $sw.Stop()
+        $err | Should -BeOfType ([GhApiException])
+        $err.Status | Should -Be 0
+        $err.Message | Should -BeExactly 'gh timed out after 1s'
+        $sw.Elapsed.TotalSeconds | Should -BeLessThan 30
+    }
+    It 'the default timeout is 120 s' {
+        InModuleScope GhApi { $script:GhTimeoutMs } | Should -Be 120000
     }
 }

@@ -55,9 +55,11 @@ function Get-Hashes($Files) {
 }
 
 # The branch is the sync's own when it differs from the default branch only in owned files
-# and the lock, and those equal the render named by its own lock (rendered with the default
-# branch's config). Ownership is judged by content because every writer is the same login.
-function Get-BranchView($State, $Repo, $Config, $Rendered, $Lock, $Pr) {
+# and the lock, and those equal the render named by its own lock, rendered with the config
+# at the branch head (the default branch's config when the branch has none), so a config
+# change merged while the PR is open does not make the branch foreign. Ownership is judged
+# by content because every writer is the same login.
+function Get-BranchView($State, $Repo, $Config, $Rendered, $Lock, $Pr, [string]$RenderSha) {
     $bs = Get-SyncBranchState -Repo $Repo -DefaultBranch $State.DefaultBranch
     if ($null -eq $bs) { return $null }
     # A branch still at the head of the newest sync PR, which was merged, is stale: its
@@ -85,11 +87,19 @@ function Get-BranchView($State, $Repo, $Config, $Rendered, $Lock, $Pr) {
     }
 
     try {
-        $branchRender = Invoke-StubRender -Stubs (Get-StubsAtSha -RepoRoot $GhwRoot -Sha $renderSha) -Config $Config
+        $branchCfgText = (Get-RepoFiles -Repo $Repo -Ref $bs.HeadSha -Paths @('.github/gh-workflows.json'))['.github/gh-workflows.json']
     } catch {
-        return $view   # the branch's lock names a render this checkout cannot reproduce
+        if (Test-AuthError $_.Exception) { throw }
+        return $view
     }
-    if (-not [string]::Equals([string]$bs.LockText, (New-StubLock -Sha $renderSha -Files (Get-Hashes $branchRender)), [StringComparison]::Ordinal)) {
+    try {
+        $branchConfig = if ($null -ne $branchCfgText) { Read-StubConfig ([string]$branchCfgText) } else { $Config }
+        $branchRender = Invoke-StubRender -Stubs (Get-StubsAtSha -RepoRoot $GhwRoot -Sha $renderSha) -Config $branchConfig
+    } catch {
+        return $view   # an unreadable branch config, or a render this checkout cannot reproduce
+    }
+    $branchLockText = [string]$bs.LockText
+    if (-not [string]::Equals($branchLockText, (New-StubLock -Sha $renderSha -Files (Get-Hashes $branchRender)), [StringComparison]::Ordinal)) {
         return $view
     }
 
@@ -105,6 +115,11 @@ function Get-BranchView($State, $Repo, $Config, $Rendered, $Lock, $Pr) {
         }
     }
     $view.IsOwn = $true
+    # Own, but rendered with another config than this run's: not "at render" even when the
+    # SHA matches, so the push replaces it instead of merging the stale render.
+    if (-not [string]::Equals($branchLockText, (New-StubLock -Sha $RenderSha -Files (Get-Hashes $Rendered)), [StringComparison]::Ordinal)) {
+        $view.RenderSha = $null
+    }
     $view
 }
 
@@ -172,10 +187,14 @@ $tags = [string[]]@((& git -C $GhwRoot tag -l) | Where-Object { $_ })
 
 foreach ($r in $repos) {
     $repo = [string]$r.FullName
+    # Listing could not probe this repo's config: report it, keep going.
+    if ($r.PSObject.Properties['Error'] -and $r.Error) { Add-Result $repo 'failed' ([string]$r.Error); continue }
     try {
         $state = Get-SyncRepoState -Repo $repo
         $config = Read-StubConfig ([string]$state.ConfigText)
-        $sha = Resolve-StubSha -RepoRoot $GhwRoot -Ref $config.ref
+        # Render SHA = last commit touching stubs/ at or before the ref, so a docs-only
+        # gh-workflows commit is not a new render (no re-push, no override of a hand close).
+        $sha = Get-StubRenderSha -RepoRoot $GhwRoot -Sha (Resolve-StubSha -RepoRoot $GhwRoot -Ref $config.ref)
         $stubs = Get-StubsAtSha -RepoRoot $GhwRoot -Sha $sha
         Test-StubConfig -Config $config -StubNames ([string[]]@($stubs.Keys)) -Tags $tags
         $rendered = Invoke-StubRender -Stubs $stubs -Config $config
@@ -188,7 +207,7 @@ foreach ($r in $repos) {
         $repoFiles = Get-RepoFiles -Repo $repo -Ref $state.DefaultSha -Paths $paths.ToArray()
 
         $pr = Get-SyncPr -Repo $repo
-        $branch = Get-BranchView $state $repo $config $rendered $lock $pr
+        $branch = Get-BranchView $state $repo $config $rendered $lock $pr $sha
         $action = Get-SyncAction -Rendered $rendered -RenderSha $sha -RepoFiles $repoFiles -Lock $lock -Merge $config.merge -Branch $branch -Pr $pr
         $reasons = @($action.Reasons) -join '; '
         $openPr = $null -ne $pr -and $pr.State -eq 'open'
@@ -280,9 +299,16 @@ for ($i = 0; $i -lt $repos.Count; $i++) { $order[[string]$repos[$i].FullName] = 
 $sorted = @($results | Sort-Object { $order[$_.Repo] })
 $results.Clear(); foreach ($x in $sorted) { $results.Add($x) }
 
+# "Same message" ignores the per-repo part: the `gh api <METHOD> <path> failed:` prefix and
+# the repo's own name, so one outage across repos still reads as one failure.
+function Get-FailureCore($Result) {
+    $m = [string]$Result.Reason -replace '^gh api \S+ \S+ failed:\s*', ''
+    $m.Replace([string]$Result.Repo, '<repo>')
+}
 $failed = @($results | Where-Object { $_.Outcome -ceq 'failed' })
-if ($results.Count -gt 0 -and $failed.Count -eq $results.Count -and @($failed.Reason | Select-Object -Unique).Count -eq 1) {
-    Write-Report ("every repo failed: " + $failed[0].Reason) -NoLines
+$cores = @($failed | ForEach-Object { Get-FailureCore $_ })
+if ($results.Count -gt 0 -and $failed.Count -eq $results.Count -and @($cores | Select-Object -Unique).Count -eq 1) {
+    Write-Report ("every repo failed: " + $cores[0]) -NoLines
     exit 2
 }
 Write-Report ''

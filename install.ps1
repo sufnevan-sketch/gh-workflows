@@ -109,7 +109,8 @@ if (Test-Path -LiteralPath $cfgPath) {
 # Stubs come from git objects at a resolved SHA (origin/main, or the tag the config pins), never the working tree.
 # GHW_STUB_SHA is a test hook: it replaces the resolved SHA so tests need no network.
 if (-not $env:GHW_STUB_SHA) { Invoke-Git @('fetch', '-q', '--tags', 'origin') | Out-Null }
-$sha = Resolve-StubSha -RepoRoot $src -Ref $config.ref
+# The render SHA (last commit touching stubs/ at or before the ref) is what the lock records.
+$sha = Get-StubRenderSha -RepoRoot $src -Sha (Resolve-StubSha -RepoRoot $src -Ref $config.ref)
 $stubText = Get-StubsAtSha -RepoRoot $src -Sha $sha
 $tags = [string[]]@((Invoke-Git @('tag', '-l')) | Where-Object { $_ })
 Test-StubConfig -Config $config -StubNames ([string[]]@($stubText.Keys)) -Tags $tags
@@ -173,7 +174,8 @@ $name = if ($origin) { $origin -replace '^.*github\.com[:/]', '' -replace '\.git
 
 Write-Host "Copied  : $($copied -join ', ')"
 if ($skipped) { Write-Host "Skipped : $($skipped -join ', ')" }
-Write-Host "ci stub : setup=$Setup  verify=`"$Verify`"  ref=@$Ref$(if ($WorkingDirectory) { "  working-directory=$WorkingDirectory" })"
+# The merged config (an existing gh-workflows.json plus explicit parameters), not the parameter defaults.
+Write-Host "ci stub : setup=$($config.setup)  verify=`"$($config.verify)`"  ref=@$($config.ref)$(if ($config.'working-directory') { "  working-directory=$($config.'working-directory')" })"
 Write-Host ""
 Write-Host "Edit before committing:"
 Write-Host "  .github/review-context.md   -> one paragraph of project context + the contracts Claude must hold the diff against"

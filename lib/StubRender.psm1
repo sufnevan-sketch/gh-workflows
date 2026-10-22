@@ -56,6 +56,21 @@ function Resolve-StubSha {
     (Invoke-GitText $RepoRoot @('rev-parse', '--verify', "$rev^{commit}")).Trim()
 }
 
+# The render SHA: the newest commit touching stubs/ at or before $Sha. A docs-only commit on
+# top renders the same files, so it must not read as a new render (lock sha, PR title, the
+# closed-by-hand check and the branch-at-render check all compare this value).
+function Get-StubRenderSha {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string]$Sha
+    )
+
+    $out = (Invoke-GitText $RepoRoot @('log', '-1', '--format=%H', $Sha, '--', 'stubs/')).Trim()
+    if (-not $out) { Fail "no commit at or before $Sha touches stubs/" }
+    $out
+}
+
 function Get-StubsAtSha {
     [CmdletBinding()]
     param(
@@ -271,4 +286,4 @@ function Read-StubLock {
     [pscustomobject]@{ sha = $raw['sha']; files = $files }
 }
 
-Export-ModuleMember -Function Resolve-StubSha, Get-StubsAtSha, Get-DefaultStubSet, Invoke-StubRender, Get-TextSha256, New-StubLock, Read-StubLock
+Export-ModuleMember -Function Resolve-StubSha, Get-StubRenderSha, Get-StubsAtSha, Get-DefaultStubSet, Invoke-StubRender, Get-TextSha256, New-StubLock, Read-StubLock

@@ -20,7 +20,8 @@ BeforeAll {
     function script:Get-Sha([string]$Path) {
         Get-TextSha256 ([Text.UTF8Encoding]::new($false).GetString([IO.File]::ReadAllBytes($Path)))
     }
-    $script:Head = (git -C $script:RepoRoot rev-parse HEAD).Trim()
+    # The lock records the render SHA: the last commit touching stubs/, not HEAD.
+    $script:Head = (git -C $script:RepoRoot log -1 --format=%H HEAD -- stubs/).Trim()
 }
 
 AfterAll { Remove-Item Env:GHW_STUB_SHA -ErrorAction SilentlyContinue }
@@ -84,7 +85,9 @@ Describe 'install.ps1' {
         New-Item -ItemType Directory -Force (Join-Path $t '.github') | Out-Null
         $in = '{"setup":"python","merge":"manual","with":{"ci.yml/ci":{"timeout-minutes":30}}}'
         [IO.File]::WriteAllText((Join-Path $t '.github/gh-workflows.json'), $in)
-        Invoke-Install $t @('-WithAutoFix') | Out-Null
+        $out = Invoke-Install $t @('-WithAutoFix')
+        # The summary line shows the merged config, not the parameter defaults.
+        $out | Should -Match 'ci stub : setup=python  verify="pwsh ./verify.ps1"  ref=@main'
         $cfg = Get-Content (Join-Path $t '.github/gh-workflows.json') -Raw | ConvertFrom-Json
         $cfg.merge | Should -Be 'manual'
         $cfg.setup | Should -Be 'python'
@@ -124,5 +127,32 @@ Describe 'Resolve-StubSha' {
             git -C $r update-ref refs/remotes/origin/main $head
             Resolve-StubSha -RepoRoot $r -Ref 'main' | Should -Be $head
         } finally { if ($saved) { $env:GHW_STUB_SHA = $saved } }
+    }
+}
+
+Describe 'Get-StubRenderSha' {
+    It 'a docs-only commit after a stubs commit keeps the same render SHA' {
+        $r = Join-Path $TestDrive 'renderRepo'
+        New-Item -ItemType Directory -Force (Join-Path $r 'stubs') | Out-Null
+        git -C $r init -q
+        [IO.File]::WriteAllText((Join-Path $r 'stubs/a.yml'), "name: a`n")
+        git -C $r add stubs/a.yml
+        git -C $r -c user.name=t -c user.email=t@example.com commit -q -m stubs
+        $stubsSha = (git -C $r rev-parse HEAD).Trim()
+        [IO.File]::WriteAllText((Join-Path $r 'README.md'), "docs`n")
+        git -C $r add README.md
+        git -C $r -c user.name=t -c user.email=t@example.com commit -q -m docs
+        $docsSha = (git -C $r rev-parse HEAD).Trim()
+        $docsSha | Should -Not -Be $stubsSha
+        Get-StubRenderSha -RepoRoot $r -Sha $docsSha | Should -Be $stubsSha
+        Get-StubRenderSha -RepoRoot $r -Sha $stubsSha | Should -Be $stubsSha
+    }
+
+    It 'fails when no commit touches stubs/' {
+        $r = Join-Path $TestDrive 'noStubs'
+        New-Item -ItemType Directory $r | Out-Null
+        git -C $r init -q
+        git -C $r -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m one
+        { Get-StubRenderSha -RepoRoot $r -Sha 'HEAD' } | Should -Throw '*touches stubs/*'
     }
 }

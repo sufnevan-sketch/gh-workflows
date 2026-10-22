@@ -71,7 +71,7 @@ Describe 'adoption' {
         $res = Invoke-InstallAdopt $repo
         $res.Code | Should -Be 0 -Because $res.Out
         $lock = Read-StubLock ([IO.File]::ReadAllText((Join-Path $repo '.github/gh-workflows.lock')))
-        $lock.sha | Should -Be (git -C $script:RepoRoot rev-parse HEAD).Trim()
+        $lock.sha | Should -Be (git -C $script:RepoRoot log -1 --format=%H HEAD -- stubs/).Trim()
         $lock.files.Count | Should -BeGreaterThan 0
         foreach ($k in $lock.files.Keys) { $lock.files[$k] | Should -Be (Get-TextHash (Join-Path $repo $k)) -Because $k }
     }
@@ -123,7 +123,7 @@ Describe 'adoption' {
         $r.Match.Matched | Should -BeFalse
         $r.Match.Differences | Should -Contain '.github/workflows/ci.yml'
         $r.Match.Differences.Count | Should -Be 1
-        $r.Match.Sha | Should -Be (git -C $script:RepoRoot rev-parse HEAD).Trim()
+        $r.Match.Sha | Should -Be (git -C $script:RepoRoot log -1 --format=%H HEAD -- stubs/).Trim()
 
         $res = Invoke-InstallAdopt $repo
         $res.Code | Should -Be 0 -Because $res.Out

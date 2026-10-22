@@ -95,18 +95,18 @@ Stubs pin `@main`, so a change to a reusable workflow reaches every repo at once
 **Two files per repo**, both under `.github/`:
 
 - `gh-workflows.json`, the repo's choices. `ref` (`main` or an existing gh-workflows tag; default `main`), `setup`, `verify`, `working-directory`, `auto-fix` (bool), `stubs` (the stub set, for repos that deviate from the default, e.g. review-only), `merge` (`auto` or `manual`), `with` (per-stub inputs, keyed `<stub>.yml/<jobId>`, e.g. `{"auto-merge.yml/gate": {"delete-branch": false}}`), `secrets` (extra named secrets per stub job, e.g. `OPENAI_API_KEY` for codex `mode: action`), and `ledger-expiry` (bool). Every string is one line; unknown fields are an error, so the repo's sync fails rather than rendering half a config.
-- `gh-workflows.lock`, written only by tooling: the gh-workflows commit the stubs were rendered from and a sha256 per owned stub.
+- `gh-workflows.lock`, written only by tooling: the gh-workflows commit the stubs were rendered from (the last commit touching `stubs/` at or before `ref`, so a docs-only commit is not a new render) and a sha256 per owned stub.
 
 The gate refuses any PR that touches either file, like a workflow file, so both change only by a hand merge or by the sync's own merge. A config change is a PR you merge; the sync PR that renders it afterwards merges itself. The sync deletes `chore/gh-workflows-sync` after it merges the PR or closes it as superseded, and a branch still at the head of the newest sync PR, merged, counts as landed rather than as someone else's.
 
-**Adoption.** A repo installed by the current `install.ps1` already has both files. A repo installed earlier has stubs but neither file: `pwsh install.ps1 -Repo <repo-root> -Adopt` infers the config from the installed stubs and writes the config and lock without changing a stub. Commit them on a `docs/` branch; the PR is a hand merge (the gate refuses it). A stub that does not match the render of the inferred config is locked at the rendered hash, so the first sync reports it as drift instead of overwriting it.
+**Adoption.** A repo installed by the current `install.ps1` already has both files. A repo installed earlier has stubs but neither file: `pwsh install.ps1 -Repo <repo-root> -Adopt` infers the config from the installed stubs and writes the config and lock without changing a stub. Commit them on a `chore/` branch; the PR is a hand merge (the gate refuses it). A stub that does not match the render of the inferred config is locked at the rendered hash, so the first sync reports it as drift instead of overwriting it.
 
 **When a sync PR waits for you** (outcome `held`; the reason is on the repo's output line, and also in the PR body under "Waits for a human merge because:" when the sync opened or updated the PR):
 
 - `not adopted`: the repo has a config but no lock.
 - `drift: <stub> differs from lock` / `missing` / `exists but is not in lock`: a stub was edited by hand. There is no "keep my edit" path; make it a config field or drop it.
 - `merge: manual`: the config says so.
-- `sync branch changed by someone else`: `chore/gh-workflows-sync` holds anything other than the sync's own render (judged by content, since every writer uses the same login), e.g. a commit pushed to it, or a config change merged while its PR was open. Look at what changed: merge the PR by hand if you want it (the next run then treats the branch as landed), or delete the branch and the next run starts over.
+- `sync branch changed by someone else`: `chore/gh-workflows-sync` holds anything other than the sync's own render (judged by content, since every writer uses the same login), e.g. a commit pushed to it. A config change merged while its PR is open does not count: the branch is judged against the config at its own head, and the next run pushes the new render over it. Look at what changed: merge the PR by hand if you want it (the next run then treats the branch as landed), or delete the branch and the next run starts over.
 - `closed by hand`: you closed the sync PR for this exact render; it stays closed until gh-workflows changes the render again.
 - `CI red`: `ci / branch-name` or `ci / verify` failed on the pushed commit.
 

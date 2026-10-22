@@ -11,9 +11,12 @@ BeforeAll {
     Import-Module "$global:ST_Root/lib/StubRender.psm1" -Force
     Import-Module "$global:ST_Root/lib/StubSync.psm1" -Force
     Import-Module "$global:ST_Root/lib/GhApi.psm1" -Force
-    $env:GHW_STUB_SHA = 'HEAD'
+    # The resolved ref is a docs-only commit on top of HEAD (same tree, a dangling object, no
+    # ref moves): the render SHA is still the last commit touching stubs/, never the ref head.
+    $global:ST_DocsHead = (git -C $global:ST_Root -c user.name=t -c user.email=t@example.com commit-tree 'HEAD^{tree}' -p HEAD -m 'docs: only').Trim()
+    $env:GHW_STUB_SHA = $global:ST_DocsHead
     $global:ST_Runner = Join-Path $global:ST_Root 'lib/Invoke-StubSync.ps1'
-    $global:ST_Head = (git -C $global:ST_Root rev-parse HEAD).Trim()
+    $global:ST_Head = (git -C $global:ST_Root log -1 --format=%H HEAD -- stubs/).Trim()
     $global:ST_LockPath = '.github/gh-workflows.lock'
     $global:ST_ConfigText = '{"ref":"main","merge":"auto"}'
     $global:ST_DefaultSha = 'd' * 40
@@ -105,6 +108,19 @@ Describe 'Invoke-StubSync' {
         ($global:ST_Out -join "`n") | Should -Match 'gh auth login required'
     }
 
+    It 'a repo whose config probe failed while listing prints failed and the others continue' {
+        $global:ST_Repos = @(
+            [pscustomobject]@{ FullName = 'octo-org/demo'; DefaultBranch = 'main'; Error = 'gh api GET repos/octo-org/demo/contents/.github/gh-workflows.json?ref=main failed: gh: Server Error (HTTP 502)' },
+            [pscustomobject]@{ FullName = 'octo-org/other'; DefaultBranch = 'main'; Error = $null }
+        )
+        Invoke-Sync
+        $global:ST_Code | Should -Be 1
+        Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+failed\s+.*HTTP 502'
+        Line 'octo-org/other' | Should -Match '^octo-org/other\s+merged\b'
+        Should -Invoke Get-SyncRepoState -Times 0 -Exactly -ParameterFilter { $Repo -eq 'octo-org/demo' }
+        $global:ST_Out[-1] | Should -BeExactly 'SUMMARY merged=1 current=0 pending=0 held=0 failed=1'
+    }
+
     It 'auth failure while listing repos exits 2' {
         Mock Get-SyncRepoList { throw [GhAuthException]::new('not logged in', 401) }
         Invoke-Sync
@@ -187,12 +203,30 @@ Describe 'Invoke-StubSync' {
     }
 
     It 'all repos failing the same way prints one top line and exits 2' {
-        Mock Get-SyncRepoState { throw [GhApiException]::new('gh: Server Error (HTTP 502)', 502) }
+        # Real messages carry the per-repo path: "gh api GET repos/<repo> failed: ...".
+        Mock Get-SyncRepoState { throw [GhApiException]::new("gh api GET repos/$Repo failed: gh: Server Error (HTTP 502)", 502) }
         Invoke-Sync
         $global:ST_Code | Should -Be 2
         $global:ST_Out.Count | Should -Be 2
-        $global:ST_Out[0] | Should -Match 'Server Error \(HTTP 502\)'
+        $global:ST_Out[0] | Should -BeExactly 'every repo failed: gh: Server Error (HTTP 502)'
         $global:ST_Out[1] | Should -BeExactly 'SUMMARY merged=0 current=0 pending=0 held=0 failed=2'
+    }
+
+    It 'the render SHA is the last stubs/ commit, not the docs-only ref head' {
+        $global:ST_Head | Should -Not -Be $global:ST_DocsHead
+        $global:ST_Repos = @($global:ST_Repos[0])
+        Invoke-Sync
+        Should -Invoke Publish-SyncCommit -Times 1 -Exactly -ParameterFilter { $Files[$global:ST_LockPath] -ceq $global:ST_RenderLock }
+    }
+
+    It 'a PR closed by hand stays held across a docs-only gh-workflows commit' {
+        $global:ST_Repos = @($global:ST_Repos[0])
+        Mock Get-SyncPr { [pscustomobject]@{ Number = 8; State = 'closed'; Merged = $false; HeadSha = 'e' * 40; LockSha = $global:ST_Head } }
+        Invoke-Sync
+        $global:ST_Code | Should -Be 1
+        Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+held\s+closed by hand'
+        Should -Invoke Publish-SyncCommit -Times 0 -Exactly
+        Should -Invoke Set-SyncPr -Times 0 -Exactly
     }
 
     It 'zero repos prints a zero summary and exits 0' {
@@ -231,7 +265,7 @@ Describe 'Invoke-StubSync' {
             }
         }
 
-        It 'wait: branch already current with an open PR merges at the branch head' {
+        It 'wait: branch already current with an open PR merges at the branch head (no force-push after a docs-only gh-workflows commit)' {
             Mock Get-SyncPr { [pscustomobject]@{ Number = 5; State = 'open'; Merged = $false; HeadSha = $global:ST_BranchHead; LockSha = $global:ST_Head } }
             Invoke-Sync
             Should -Invoke Publish-SyncCommit -Times 0 -Exactly
@@ -245,6 +279,30 @@ Describe 'Invoke-StubSync' {
             Should -Invoke Publish-SyncCommit -Times 0 -Exactly
             Should -Invoke Set-SyncPr -Times 1 -Exactly
             Should -Invoke Merge-SyncPr -Times 1 -Exactly -ParameterFilter { $Sha -eq $global:ST_BranchHead }
+        }
+
+        It 'a config change merged while the sync PR is open does not make the branch foreign' {
+            # The branch was rendered with its own (older) config; the default branch now has C2.
+            $c2 = '{"ref":"main","merge":"auto","setup":"python"}'
+            $global:ST_C2Render = Invoke-StubRender -Stubs (Get-StubsAtSha -RepoRoot $global:ST_Root -Sha $global:ST_Head) -Config (Read-StubConfig $c2)
+            $global:ST_BranchFiles['.github/gh-workflows.json'] = $global:ST_ConfigText
+            Mock Get-SyncRepoState { New-State -ConfigText '{"ref":"main","merge":"auto","setup":"python"}' }
+            Mock Get-SyncPr { [pscustomobject]@{ Number = 5; State = 'open'; Merged = $false; HeadSha = $global:ST_BranchHead; LockSha = $global:ST_Head } }
+            Invoke-Sync
+            $global:ST_Code | Should -Be 0
+            Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+merged\b'
+            # Not merged at the stale branch head: re-pushed with the C2 render first.
+            Should -Invoke Publish-SyncCommit -Times 1 -Exactly -ParameterFilter {
+                $Files['.github/workflows/ci.yml'] -ceq $global:ST_C2Render['.github/workflows/ci.yml'] -and
+                $Files['.github/workflows/ci.yml'] -cne $global:ST_Rendered['.github/workflows/ci.yml']
+            }
+            Should -Invoke Merge-SyncPr -Times 0 -Exactly -ParameterFilter { $Sha -eq $global:ST_BranchHead }
+        }
+
+        It 'a branch whose own config does not parse is not own' {
+            $global:ST_BranchFiles['.github/gh-workflows.json'] = '{"bogus":1}'
+            Invoke-Sync
+            Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+held\s+sync branch changed by someone else'
         }
 
         It 'a non-owned path on the branch holds' {

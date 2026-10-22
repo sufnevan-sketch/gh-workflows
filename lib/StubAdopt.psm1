@@ -222,7 +222,9 @@ function Find-StubRenderMatch {
         [string]$HeadRef = 'origin/main'
     )
 
-    $headSha = Resolve-Commit $RepoRoot $HeadRef
+    # Every candidate is a render SHA (a commit touching stubs/); head is the newest of them,
+    # so a docs-only commit on top of the last stubs commit is never written to a lock.
+    $headSha = Get-StubRenderSha -RepoRoot $RepoRoot -Sha (Resolve-Commit $RepoRoot $HeadRef)
     $log = & git -C $RepoRoot log --format=%H $headSha -- stubs/
     if ($LASTEXITCODE -ne 0) { Fail "git log failed in $RepoRoot" }
     $candidates = @($headSha) + @($log | Where-Object { $_ -and $_ -cne $headSha })

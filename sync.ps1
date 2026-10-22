@@ -25,6 +25,8 @@ function Invoke-Git([string[]]$GitArgs) {
 # --force: a tag moved upstream (a re-pinned ref) must win over the stale local copy.
 Invoke-Git @('-C', $PSScriptRoot, 'fetch', '-q', '--force', '--tags', 'origin')
 if (-not (Test-Path -LiteralPath (Join-Path $runner '.git'))) {
+    # A runner folder deleted by hand leaves a stale worktree entry that makes `worktree add` refuse.
+    Invoke-Git @('-C', $PSScriptRoot, 'worktree', 'prune')
     Invoke-Git @('-C', $PSScriptRoot, 'worktree', 'add', '-q', '--detach', $runner, 'origin/main')
 }
 $dirty = & git -C $runner status --porcelain

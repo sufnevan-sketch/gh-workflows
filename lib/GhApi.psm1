@@ -21,13 +21,15 @@ public class GhAuthException : GhApiException {
 $script:SyncBranch = 'chore/gh-workflows-sync'
 $script:ConfigPath = '.github/gh-workflows.json'
 $script:LockPath = '.github/gh-workflows.lock'
+$script:GhTimeoutMs = 120000   # a hung gh (network stall, credential prompt) must not eat the 10-minute run
 
 function Invoke-GhProcess {
     # Seam for the stderr->exception test. Returns @{ ExitCode; Stdout; Stderr }.
+    # -FileName and -TimeoutMs are test seams; the defaults are gh and 120 s.
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string[]]$Arguments, [string]$StdIn)
+    param([Parameter(Mandatory)][string[]]$Arguments, [string]$StdIn, [string]$FileName = 'gh', [int]$TimeoutMs = $script:GhTimeoutMs)
 
-    $psi = [System.Diagnostics.ProcessStartInfo]::new('gh')
+    $psi = [System.Diagnostics.ProcessStartInfo]::new($FileName)
     $quoted = foreach ($a in $Arguments) { '"' + ($a -replace '"', '\"') + '"' }
     $psi.Arguments = $quoted -join ' '
     $psi.UseShellExecute = $false
@@ -44,7 +46,11 @@ function Invoke-GhProcess {
         $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
     }
     $proc.StandardInput.Close()
-    $proc.WaitForExit()
+    if (-not $proc.WaitForExit($TimeoutMs)) {
+        try { $proc.Kill($true) } catch { }   # the whole tree: gh may have spawned a helper
+        throw [GhApiException]::new("gh timed out after $([int]($TimeoutMs / 1000))s", 0)
+    }
+    $proc.WaitForExit()   # drains the redirected streams after the timed wait
     [pscustomobject]@{ ExitCode = $proc.ExitCode; Stdout = $outTask.Result; Stderr = $errTask.Result }
 }
 
@@ -129,9 +135,18 @@ function Get-SyncRepoList {
         $repos = @(Invoke-GhApi -Method GET -Path $path -Paginate)
         foreach ($r in $repos) {
             if ($r.archived) { continue }
-            $files = Get-RepoFiles -Repo $r.full_name -Ref $r.default_branch -Paths @($script:ConfigPath)
+            # One repo's probe error must not hide the rest: return it as a failed entry
+            # (Error set) for the runner to report. An auth failure still aborts the run.
+            try {
+                $files = Get-RepoFiles -Repo $r.full_name -Ref $r.default_branch -Paths @($script:ConfigPath)
+            } catch [GhAuthException] {
+                throw
+            } catch {
+                [pscustomobject]@{ FullName = $r.full_name; DefaultBranch = $r.default_branch; Error = [string]$_.Exception.Message }
+                continue
+            }
             if ($files.ContainsKey($script:ConfigPath)) {
-                [pscustomobject]@{ FullName = $r.full_name; DefaultBranch = $r.default_branch }
+                [pscustomobject]@{ FullName = $r.full_name; DefaultBranch = $r.default_branch; Error = $null }
             }
         }
     }
@@ -222,7 +237,9 @@ function Publish-SyncCommit {
     foreach ($d in $Deletes) {
         $tree.Add(@{ path = $d; mode = '100644'; type = 'blob'; sha = $null })
     }
-    $t = Invoke-GhApi -Method POST -Path "repos/$Repo/git/trees" -Body @{ base_tree = $DefaultSha; tree = $tree.ToArray() }
+    # base_tree takes a tree SHA; the default branch head is a commit, so use its tree.
+    $baseTree = [string](Invoke-GhApi -Method GET -Path "repos/$Repo/git/commits/$DefaultSha").tree.sha
+    $t = Invoke-GhApi -Method POST -Path "repos/$Repo/git/trees" -Body @{ base_tree = $baseTree; tree = $tree.ToArray() }
     $c = Invoke-GhApi -Method POST -Path "repos/$Repo/git/commits" -Body @{ message = $Message; tree = $t.sha; parents = @($DefaultSha) }
     $exists = $true
     try {
