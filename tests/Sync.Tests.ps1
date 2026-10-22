@@ -308,6 +308,35 @@ Describe 'Invoke-StubSync' {
             Should -Invoke Publish-SyncCommit -Times 0 -Exactly
         }
 
+        It 'a superseded close keeps a branch someone else changed' {
+            Mock Get-RepoFiles {
+                if ($Ref -eq $global:ST_DefaultSha) { Select-Files $global:ST_Rendered $Paths }
+                elseif ($Ref -eq $global:ST_BranchHead) { Select-Files $global:ST_BranchFiles $Paths }
+                else { @{} }
+            }
+            Mock Get-SyncRepoState { New-State -LockText $global:ST_RenderLock }
+            Mock Get-SyncBranchState {
+                [pscustomobject]@{ HeadSha = $global:ST_BranchHead; ChangedPaths = [string[]]@($global:ST_LockPath, 'README.md'); LockText = $global:ST_RenderLock }
+            }
+            Mock Get-SyncPr { [pscustomobject]@{ Number = 4; State = 'open'; Merged = $false; HeadSha = $global:ST_BranchHead; LockSha = $global:ST_OldSha } }
+            Invoke-Sync
+            Should -Invoke Close-SyncPr -Times 1 -Exactly
+            Should -Invoke Remove-SyncBranch -Times 0 -Exactly
+            Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+current\s+closed superseded PR #4; branch kept: changed by someone else'
+        }
+
+        It 'a superseded close deletes the sync branch when it is the sync''s own' {
+            Mock Get-RepoFiles {
+                if ($Ref -eq $global:ST_DefaultSha) { Select-Files $global:ST_Rendered $Paths }
+                elseif ($Ref -eq $global:ST_BranchHead) { Select-Files $global:ST_BranchFiles $Paths }
+                else { @{} }
+            }
+            Mock Get-SyncRepoState { New-State -LockText $global:ST_RenderLock }
+            Mock Get-SyncPr { [pscustomobject]@{ Number = 4; State = 'open'; Merged = $false; HeadSha = $global:ST_BranchHead; LockSha = $global:ST_Head } }
+            Invoke-Sync
+            Should -Invoke Remove-SyncBranch -Times 1 -Exactly
+        }
+
         It 'WhatIf on the wait path writes nothing' {
             Mock Get-SyncPr { [pscustomobject]@{ Number = 5; State = 'open'; Merged = $false; HeadSha = $global:ST_BranchHead; LockSha = $global:ST_Head } }
             Invoke-Sync -WhatIf
@@ -329,6 +358,15 @@ Describe 'Invoke-StubSync' {
         Invoke-Sync
         $global:ST_Code | Should -Be 0
         Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+merged\s+.*branch not deleted.*502'
+    }
+
+    It 'an auth error deleting the branch after a merge keeps the merged line' {
+        $global:ST_Repos = @($global:ST_Repos[0])
+        Mock Remove-SyncBranch { throw [GhAuthException]::new('token revoked (HTTP 401)', 401) }
+        Invoke-Sync
+        $global:ST_Code | Should -Be 2
+        $global:ST_Out[0] | Should -Match 'token revoked'
+        Line 'octo-org/demo' | Should -Match '^octo-org/demo\s+merged\s+PR #7'
     }
 
     It 'WhatIf on current with an open PR writes nothing' {

@@ -41,7 +41,7 @@ function Get-SyncAction {
 
     if ($null -ne $Pr -and $Pr.State -eq 'closed' -and -not $Pr.Merged) {
         if ($null -eq $Pr.LockSha) { return New-SyncResult 'hold' @('closed by hand (lock unreadable)') }
-        if ($Pr.LockSha -eq $RenderSha) { return New-SyncResult 'hold' @('closed by hand') }
+        if ($Pr.LockSha -ceq $RenderSha) { return New-SyncResult 'hold' @('closed by hand') }
     }
 
     if ($null -ne $Branch -and -not $Branch.IsOwn) {

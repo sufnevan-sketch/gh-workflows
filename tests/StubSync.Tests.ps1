@@ -61,6 +61,11 @@ Describe 'Get-SyncAction' {
         $r.Reasons | Should -Contain 'closed by hand'
     }
 
+    It 'closed PR lock SHA compares case-sensitively' {
+        $pr = [pscustomobject]@{ Number = 5; State = 'closed'; Merged = $false; HeadSha = 'h'; LockSha = 'NEW-RENDER' }
+        (Invoke-Sync -Rendered $NewRendered -RepoFiles $OldFiles -Lock $GoodLock -Pr $pr).Action | Should -Be 'push'
+    }
+
     It 'closed unmerged PR for an older render pushes again' {
         $pr = [pscustomobject]@{ Number = 5; State = 'closed'; Merged = $false; HeadSha = 'h'; LockSha = 'older-render' }
         (Invoke-Sync -Rendered $NewRendered -RepoFiles $OldFiles -Lock $GoodLock -Pr $pr).Action | Should -Be 'push'

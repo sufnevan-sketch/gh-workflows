@@ -153,7 +153,7 @@ function Exit-Auth($Exception) {
 function Remove-BranchNote([string]$Repo) {
     try { Remove-SyncBranch -Repo $Repo; '' } catch {
         if (Test-AuthError $_.Exception) { Exit-Auth $_.Exception }
-        "; branch not deleted: $($_.Exception.Message)"
+        "; branch not deleted: $(Get-OneLine $_.Exception.Message)"
     }
 }
 
@@ -199,7 +199,10 @@ foreach ($r in $repos) {
                     if ($WhatIf) { Add-Result $repo 'current' "would close superseded PR #$($pr.Number)" }
                     else {
                         Close-SyncPr -Repo $repo -Number $pr.Number -Comment "Superseded: stubs already match gh-workflows $(Get-Short $sha)."
-                        Add-Result $repo 'current' ("closed superseded PR #$($pr.Number)" + (Remove-BranchNote $repo))
+                        # `current` is decided before branch ownership: delete only a branch that is the sync's own.
+                        Add-Result $repo 'current' "closed superseded PR #$($pr.Number)"
+                        $note = if ($null -eq $branch -or $branch.IsOwn) { Remove-BranchNote $repo } else { '; branch kept: changed by someone else' }
+                        $results[$results.Count - 1].Reason += $note
                     }
                 } else { Add-Result $repo 'current' '' }
             }
@@ -249,7 +252,9 @@ if ($queue.Count -gt 0) {
                 if ($ci.BranchName -eq 'success' -and $ci.Verify -eq 'success') {
                     # The SHA makes GitHub refuse the merge if the PR head moved since the push.
                     Merge-SyncPr -Repo $q.Repo -Number $q.Number -Sha $q.Sha
-                    Add-Result $q.Repo 'merged' ("PR #$($q.Number)" + (Remove-BranchNote $q.Repo))
+                    # Record the merge first, so an auth abort during the delete still prints it.
+                    Add-Result $q.Repo 'merged' "PR #$($q.Number)"
+                    $results[$results.Count - 1].Reason += (Remove-BranchNote $q.Repo)
                     [void]$pendingQ.Remove($q)
                 } elseif ($ci.BranchName -eq 'failure' -or $ci.Verify -eq 'failure') {
                     Add-Result $q.Repo 'held' "CI red on PR #$($q.Number) (branch-name $($ci.BranchName), verify $($ci.Verify))"
