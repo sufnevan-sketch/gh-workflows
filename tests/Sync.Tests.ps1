@@ -299,6 +299,23 @@ Describe 'Invoke-StubSync' {
             Should -Invoke Merge-SyncPr -Times 0 -Exactly -ParameterFilter { $Sha -eq $global:ST_BranchHead }
         }
 
+        It 'an error reading the branch config fails the repo instead of holding the branch as foreign' {
+            Mock Get-RepoFiles {
+                if ($Ref -eq $global:ST_BranchHead -and $Paths -contains '.github/gh-workflows.json') {
+                    throw [GhApiException]::new('gh api GET repos/octo-org/demo/contents/.github/gh-workflows.json failed: gh: Server Error (HTTP 502)', 502)
+                }
+                if ($Ref -eq $global:ST_DefaultSha) { Select-Files $global:ST_Behind $Paths }
+                elseif ($Ref -eq $global:ST_BranchHead) { Select-Files $global:ST_BranchFiles $Paths }
+                else { @{} }
+            }
+            Invoke-Sync
+            # The only repo failed, so the run reports it on the top line (exit 2), not as a hold.
+            $global:ST_Code | Should -Be 2
+            $global:ST_Out[0] | Should -Match '^every repo failed: .*HTTP 502'
+            ($global:ST_Out -join "`n") | Should -Not -Match 'changed by someone else'
+            Should -Invoke Publish-SyncCommit -Times 0 -Exactly
+        }
+
         It 'a branch whose own config does not parse is not own' {
             $global:ST_BranchFiles['.github/gh-workflows.json'] = '{"bogus":1}'
             Invoke-Sync

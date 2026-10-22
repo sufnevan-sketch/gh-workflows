@@ -86,12 +86,8 @@ function Get-BranchView($State, $Repo, $Config, $Rendered, $Lock, $Pr, [string]$
         if ($p -cne $LockPath -and -not $owned.Contains($p)) { return $view }
     }
 
-    try {
-        $branchCfgText = (Get-RepoFiles -Repo $Repo -Ref $bs.HeadSha -Paths @('.github/gh-workflows.json'))['.github/gh-workflows.json']
-    } catch {
-        if (Test-AuthError $_.Exception) { throw }
-        return $view
-    }
+    # A read error (not a 404, which is "absent") fails the repo; it must not read as a foreign branch.
+    $branchCfgText = (Get-RepoFiles -Repo $Repo -Ref $bs.HeadSha -Paths @('.github/gh-workflows.json'))['.github/gh-workflows.json']
     try {
         $branchConfig = if ($null -ne $branchCfgText) { Read-StubConfig ([string]$branchCfgText) } else { $Config }
         $branchRender = Invoke-StubRender -Stubs (Get-StubsAtSha -RepoRoot $GhwRoot -Sha $renderSha) -Config $branchConfig
