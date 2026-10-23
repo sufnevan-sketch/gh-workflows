@@ -76,6 +76,27 @@ Describe 'adoption' {
         foreach ($k in $lock.files.Keys) { $lock.files[$k] | Should -Be (Get-TextHash (Join-Path $repo $k)) -Because $k }
     }
 
+    It 'a CRLF checkout (core.autocrlf=true) still matches and locks the LF hashes sync reads from GitHub' {
+        $repo = New-Fixture $script:OlderSha (New-Cfg)
+        $lf = @{}
+        foreach ($f in (Get-ChildItem (Join-Path $repo '.github/workflows') -Filter *.yml)) {
+            $lf[".github/workflows/$($f.Name)"] = Get-TextSha256 ([IO.File]::ReadAllText($f.FullName))
+        }
+        # Commit the LF stubs, then check them out again the way Windows Git does: CRLF on disk.
+        git -C $repo -c core.autocrlf=false add -A
+        git -C $repo -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q -m seed
+        git -C $repo config core.autocrlf true
+        Remove-Item (Join-Path $repo '.github/workflows/*.yml')
+        git -C $repo checkout -q -- .github/workflows
+        [IO.File]::ReadAllText((Join-Path $repo '.github/workflows/ci.yml')) | Should -Match "`r`n"
+        $res = Invoke-InstallAdopt $repo
+        $res.Code | Should -Be 0 -Because $res.Out
+        $res.Out | Should -Match 'byte-identical'
+        $lock = Read-StubLock ([IO.File]::ReadAllText((Join-Path $repo '.github/gh-workflows.lock')))
+        $lock.sha | Should -Be $script:OlderSha
+        foreach ($k in $lock.files.Keys) { $lock.files[$k] | Should -Be $lf[$k] -Because $k }
+    }
+
     It 'infers pnpm, verify, working-directory and auto-fix' {
         $cfg = New-Cfg @{ setup = 'node-pnpm'; verify = 'pnpm verify'; 'working-directory' = 'web'; 'auto-fix' = $true }
         $repo = New-Fixture 'HEAD' $cfg
@@ -144,6 +165,18 @@ Describe 'adoption' {
         $r.Match.Differences | Should -Contain '.github/workflows/ci.yml'
         $r.Inferred.setup | Should -Be 'none'
         (Invoke-InstallAdopt $repo).Code | Should -Be 0
+    }
+
+    It 'a stub COMMITTED with CRLF stays a difference (GitHub serves those bytes)' {
+        $repo = New-Fixture 'HEAD' (New-Cfg)
+        $ci = Join-Path $repo '.github/workflows/ci.yml'
+        [IO.File]::WriteAllText($ci, ([IO.File]::ReadAllText($ci) -replace "`n", "`r`n"), $script:Utf8)
+        git -C $repo -c core.autocrlf=false add -A
+        git -C $repo -c core.autocrlf=false -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q -m seed
+        $res = Invoke-InstallAdopt $repo
+        $res.Code | Should -Be 0 -Because $res.Out
+        $res.Out | Should -Match '\.github/workflows/ci\.yml'
+        $res.Out | Should -Not -Match 'byte-identical'
     }
 
     It 'review-only set becomes an explicit stubs list with merge manual' {
