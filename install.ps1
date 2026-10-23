@@ -55,7 +55,24 @@ if ($Adopt) {
   $headStubs = Get-StubsAtSha -RepoRoot $src -Sha $headSha
   $current = [ordered]@{}
   foreach ($f in (Get-ChildItem -LiteralPath $wfDir -Filter *.yml -File | Sort-Object { $_.Name } -CaseSensitive)) {
-    if ($headStubs.ContainsKey($f.Name)) { $current[".github/workflows/$($f.Name)"] = $utf8.GetString([IO.File]::ReadAllBytes($f.FullName)) }
+    if (-not $headStubs.ContainsKey($f.Name)) { continue }
+    $rel = ".github/workflows/$($f.Name)"
+    # Sync compares against the committed blob GitHub serves, not the working copy. A file git
+    # calls unchanged from HEAD (core.autocrlf=true puts CRLF on disk) is hashed as its blob;
+    # an untracked or edited file as its disk bytes, so a real edit still reads as a difference.
+    & git -C $Repo diff --quiet HEAD -- $rel 2>$null
+    $clean = $LASTEXITCODE -eq 0
+    if ($clean) { & git -C $Repo cat-file -e "HEAD:$rel" 2>$null; $clean = $LASTEXITCODE -eq 0 }
+    $current[$rel] = if ($clean) {
+      # Raw blob bytes (PowerShell pipes would re-encode them and drop a committed CR).
+      $psi = [Diagnostics.ProcessStartInfo]::new('git')
+      foreach ($a in @('-C', $Repo, 'cat-file', 'blob', "HEAD:$rel")) { $psi.ArgumentList.Add($a) }
+      $psi.RedirectStandardOutput = $true; $psi.UseShellExecute = $false
+      $p = [Diagnostics.Process]::Start($psi)
+      $ms = [IO.MemoryStream]::new(); $p.StandardOutput.BaseStream.CopyTo($ms); $p.WaitForExit()
+      if ($p.ExitCode -ne 0) { throw "git cat-file blob HEAD:$rel failed in $Repo" }
+      $utf8.GetString($ms.ToArray())
+    } else { $utf8.GetString([IO.File]::ReadAllBytes($f.FullName)) }
   }
   if ($current.Count -eq 0) { throw "No gh-workflows stubs found in $wfDir." }
   $inferred = Get-InferredStubConfig -WorkflowsDir $wfDir -StubNames ([string[]]@($headStubs.Keys)) -Templates $headStubs
